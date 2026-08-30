@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SN Helper Panel</title>
+    <link rel="stylesheet" href="./panel.css" />
+  </head>
+  <body>
+    <div id="root" class="panel-root">
+      <header class="panel-header">
+        <div class="panel-title">
+          <span class="panel-logo">SN</span>
+          <span>SN Helper</span>
+        </div>
+        <div class="panel-header-actions">
+          <button id="btn-add-field" class="panel-icon-button" title="Add a field from the page (element picker)" type="button">
+            +
+          </button>
+          <button id="btn-settings" class="panel-icon-button" title="Open settings" type="button">
+            ⚙
+          </button>
+        </div>
+      </header>
+
+      <main class="panel-body">
+        <section class="panel-section">
+          <div class="panel-section-head">
+            <h2 class="panel-section-title">Field Library</h2>
+            <button id="btn-picker" class="panel-primary-button" type="button">Add Field</button>
+          </div>
+          <p id="fields-empty" class="panel-empty">
+            No fields captured yet. Click <strong>Add Field</strong> to start
+            the element picker, then click a ServiceNow form field on the page.
+          </p>
+          <div id="fields-root" class="panel-field-lib" aria-label="Field library"></div>
+        </section>
+
+        <section class="panel-section">
+          <h2 class="panel-section-title">Field Groups</h2>
+          <p id="groups-empty" class="panel-empty">No groups yet. Define them in Settings.</p>
+          <ul id="groups-list" class="panel-list" aria-label="Field groups"></ul>
+        </section>
+
+        <section class="panel-section">
+          <h2 class="panel-section-title">Services</h2>
+          <p id="services-empty" class="panel-empty">No services yet. Define them in Settings.</p>
+          <ul id="services-list" class="panel-list" aria-label="Remote services"></ul>
+        </section>
+
+        <section class="panel-section">
+          <h2 class="panel-section-title">Token Status</h2>
+          <ul id="tokens-list" class="panel-token-list" aria-label="Token capture status"></ul>
+        </section>
+      </main>
+
+      <footer id="toast-area" class="panel-toast-area" aria-live="polite"></footer>
+    </div>
+
+    <script type="module" src="./panel.ts"></script>
+  </body>
+</html>
