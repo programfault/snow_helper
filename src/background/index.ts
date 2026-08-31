@@ -1,13 +1,16 @@
 // Service worker (MV3). Owns cross-origin fetch and message routing.
 //
 // Phase 1: Chrome Side Panel API toggle — `openPanelOnActionClick: true`.
-// Phase 2: side-panel → content-script message routing. The content
-//          script is now STATICALLY registered via manifest
-//          `content_scripts`, so it's present on every matching page by
-//          the time the user clicks Add Field; we no longer need the
-//          on-demand ping+inject logic that was trying to execute
-//          `files: ["src/content/index.ts"]` (which Chrome rejects
-//          because it wants a compiled .js, not a .ts source path).
+// Phase 2: side-panel → content-script message routing. Content script is
+//          STATICALLY registered via manifest `content_scripts` so it is
+//          present on every matching page after a navigation. As a
+//          FALLBACK, if tabs.sendMessage fails with "Receiving end does
+//          not exist" (happens right after extension reload before the
+//          user refreshes the page, or on CRXJS HMR mid-session restarts
+//          where the content script listener was torn down), we inject
+//          via chrome.scripting.executeScript using the manifest's
+//          ALREADY-RESOLVED .js file paths (not the raw .ts source path
+//          that Chrome refuses to load).
 
 chrome.runtime.onInstalled.addListener(async (details) => {
   console.log(
@@ -34,13 +37,6 @@ self.addEventListener('activate', async () => {
 
 // ---------------------------------------------------------------------------
 // Message routing
-//
-// The side panel sends PANEL_* via chrome.runtime.sendMessage without a
-// target tab id; the SW resolves the active tab and forwards with
-// chrome.tabs.sendMessage.
-// Content scripts reply via chrome.runtime.sendMessage and both the side
-// panel and SW receive them. The side panel filters by sender.tab.id to
-// ignore messages from other tabs.
 // ---------------------------------------------------------------------------
 
 const PANEL_KINDS = new Set<string>([
@@ -64,10 +60,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return;
       }
       try {
-        const reply = await chrome.tabs.sendMessage(tabId, message);
+        const reply = await sendToTabOrInject(tabId, message);
         sendResponse({ ok: true, reply });
       } catch (err) {
-        console.error('[sn-helper] tabs.sendMessage failed for kind', kind, err);
+        console.error('[sn-helper] send failed for kind', kind, err);
         sendResponse({
           ok: false,
           error: err instanceof Error ? err.message : String(err),
@@ -84,6 +80,60 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   return false;
 });
+
+/**
+ * Send a message to a tab's content script; if there is no listener,
+ * forcibly (re-)inject the content script via scripting.executeScript
+ * (using the manifest-resolved .js file paths, never raw .ts) and then
+ * retry the message. This handles the "Receiving end does not exist"
+ * failure mode that appears immediately after an extension reload
+ * before the user navigates/refreshes the page.
+ */
+async function sendToTabOrInject<T = unknown>(
+  tabId: number,
+  message: unknown,
+): Promise<T> {
+  try {
+    return (await chrome.tabs.sendMessage(tabId, message)) as T;
+  } catch (firstErr) {
+    const msg = firstErr instanceof Error ? firstErr.message : String(firstErr);
+    const connectionMissing =
+      /Receiving end does not exist/i.test(msg) ||
+      /Could not establish connection/i.test(msg) ||
+      /no listener/i.test(msg);
+    if (!connectionMissing) throw firstErr;
+
+    console.log(
+      '[sn-helper] no content script on tab',
+      tabId,
+      '; forcing (re-)inject via scripting',
+    );
+    await forceInjectContentScript(tabId);
+    return (await chrome.tabs.sendMessage(tabId, message)) as T;
+  }
+}
+
+/**
+ * Read the already-resolved JS file paths for the first content_scripts
+ * entry from the manifest (CRXJS compiled .ts → .js at this point),
+ * then executeScript with those files.
+ */
+async function forceInjectContentScript(tabId: number): Promise<void> {
+  const manifest = chrome.runtime.getManifest();
+  const scripts = manifest.content_scripts?.[0]?.js as string[] | undefined;
+  if (!scripts || scripts.length === 0) {
+    throw new Error(
+      'manifest has no content_scripts[0].js — cannot force content injection',
+    );
+  }
+  for (const file of scripts) {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: [file],
+    });
+    console.log('[sn-helper] force-injected content file', file, 'into tab', tabId);
+  }
+}
 
 async function resolveActiveTabId(): Promise<number | undefined> {
   try {
