@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "SN Helper",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "ServiceNow form automation: field picker, business groups, remote services, token capture.",
   "permissions": [
     "activeTab",
@@ -13,7 +13,8 @@
     "http://localhost/*",
     "http://127.0.0.1/*",
     "https://localhost/*",
-    "https://127.0.0.1/*"
+    "https://127.0.0.1/*",
+    "<all_urls>"
   ],
   "action": {
     "default_title": "Toggle SN Helper side panel"
@@ -22,6 +23,14 @@
     "service_worker": "src/background/index.ts",
     "type": "module"
   },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["src/content/index.ts"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
   "side_panel": {
     "default_path": "src/panel/index.html"
   },
