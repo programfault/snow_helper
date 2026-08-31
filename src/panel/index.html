@@ -8,18 +8,12 @@
   </head>
   <body>
     <div id="root" class="panel-root">
-      <header class="panel-header">
-        <div class="panel-header-actions">
-          <button id="btn-add-field" class="panel-icon-button" title="Add a field from the page (element picker)" type="button">
-            +
-          </button>
-          <button id="btn-settings" class="panel-icon-button" title="Open settings" type="button">
-            ⚙
-          </button>
-        </div>
-      </header>
-
       <main class="panel-body">
+        <div class="panel-titlebar">
+          <button id="btn-settings" class="panel-icon-button" title="Open settings" type="button">⚙</button>
+          <button id="btn-close-panel" class="panel-icon-button" title="Close side panel" type="button">✕</button>
+        </div>
+
         <section class="panel-section" id="section-fields">
           <div class="panel-section-head panel-collapsible-head" data-target="fields-root">
             <h2 class="panel-section-title">Field Library</h2>

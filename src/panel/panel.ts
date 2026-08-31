@@ -347,24 +347,16 @@ function renderEntry(e: FieldEntry): HTMLElement {
 let pickerBusy = false;
 function setPickerBusy(b: boolean): void {
   pickerBusy = b;
-  const headerBtn = document.getElementById('btn-add-field') as HTMLButtonElement | null;
   const sectionBtn = document.getElementById('btn-picker') as HTMLButtonElement | null;
-  [headerBtn, sectionBtn].forEach((btn) => {
-    if (!btn) return;
-    btn.disabled = b;
-    btn.title = b
-      ? 'Picker active on the page — click a field or press Esc to cancel'
-      : btn.id === 'btn-add-field'
-        ? 'Add a field from the page (element picker)'
-        : 'Start element picker and click a ServiceNow form field';
-    if (btn.id === 'btn-picker') {
-      btn.textContent = b ? 'Picker active…' : 'Add Field';
-    }
-  });
+  if (!sectionBtn) return;
+  sectionBtn.disabled = b;
+  sectionBtn.title = b
+    ? 'Picker active on the page — click a field or press Esc to cancel'
+    : 'Start element picker and click a ServiceNow form field';
+  sectionBtn.textContent = b ? 'Picker active…' : 'Add Field';
 }
 
 function wirePickerButtons(): void {
-  const headerBtn = document.getElementById('btn-add-field');
   const sectionBtn = document.getElementById('btn-picker');
   const start = async () => {
     if (pickerBusy) return;
@@ -377,7 +369,6 @@ function wirePickerButtons(): void {
       showToast('error', 'Picker failed', String(err));
     }
   };
-  headerBtn?.addEventListener('click', () => void start());
   sectionBtn?.addEventListener('click', () => void start());
 }
 
@@ -386,6 +377,18 @@ function wireSettingsButton(): void {
   btn?.addEventListener('click', () => {
     if (chrome.runtime?.openOptionsPage) {
       void chrome.runtime.openOptionsPage();
+    }
+  });
+}
+
+function wireCloseButton(): void {
+  const btn = document.getElementById('btn-close-panel');
+  btn?.addEventListener('click', () => {
+    // window.close() in a side panel context closes the panel.
+    try {
+      window.close();
+    } catch {
+      /* ignore */
     }
   });
 }
@@ -565,6 +568,7 @@ function renderAll(shape: StorageShape): void {
 
 async function init(): Promise<void> {
   wireSettingsButton();
+  wireCloseButton();
   wirePickerButtons();
   wireGroupsShortcuts();
   wireFieldLibCollapse();

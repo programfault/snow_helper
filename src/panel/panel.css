@@ -57,11 +57,11 @@ body {
   min-height: 0;
 }
 
-.panel-header {
+.panel-titlebar {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  padding: 6px 12px;
+  padding: 4px 10px;
   background: var(--brand-soft);
   border-bottom: 1px solid var(--border);
   flex: 0 0 auto;
@@ -73,21 +73,16 @@ body {
   border: 1px solid var(--border-strong);
   background: var(--bg);
   color: var(--brand);
-  width: 28px;
-  height: 28px;
+  width: 26px;
+  height: 26px;
   border-radius: 6px;
-  font-size: 14px;
+  font-size: 13px;
   cursor: pointer;
   transition: background 120ms ease;
 }
 
 .panel-icon-button:hover {
   background: var(--bg-muted);
-}
-
-.panel-header-actions {
-  display: flex;
-  gap: 6px;
 }
 
 .panel-body {
@@ -430,6 +425,13 @@ body {
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+
+/* display:flex would override the hidden attribute's display:none;
+   this rule restores the expected hide behavior for collapsible items. */
+.panel-group-items[hidden],
+.panel-collapsible-body[hidden] {
+  display: none !important;
 }
 
 .panel-group-item {
