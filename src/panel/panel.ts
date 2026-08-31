@@ -253,18 +253,13 @@ function renderFieldLibrary(shape: StorageShape): void {
     list.push(e);
     byName.set(e.field_name, list);
   }
-  // Sort groups by label or field_name.
+  // Sort groups by display label or field_name.
   const groups = Array.from(byName.entries()).sort(([a], [b]) => a.localeCompare(b));
 
   root.replaceChildren(
     ...groups.map(([name, list]: [string, FieldEntry[]]) => {
-      // Prefer alias/label of the most-recent entry in the group as the
-      // group-level display label; fall back to the raw field_name if no
-      // alias and no label are set on any entry.
       const latest = [...list].sort((a, b) => b.captured_at - a.captured_at)[0];
       const displayLabel = latest ? displayFieldName(latest) : name;
-      const labelText =
-        latest && latest.label && latest.label.trim() !== name ? latest.label : '';
 
       const card = document.createElement('div');
       card.className = 'panel-field-group';
@@ -275,24 +270,13 @@ function renderFieldLibrary(shape: StorageShape): void {
       nameSpan.className = 'panel-field-group-name';
       nameSpan.textContent = displayLabel;
       nameSpan.title = latest ? fieldNameTitle(latest) : name;
-      const labelSpan = document.createElement('span');
-      labelSpan.className = 'panel-field-group-label';
-      labelSpan.title = labelText || name;
-      // If the display name is already the label, don't repeat it; show
-      // the raw field_name instead so the user knows which ServiceNow
-      // sys_name this group belongs to.
-      if (displayLabel === name) {
-        labelSpan.textContent = '';
-      } else {
-        labelSpan.textContent = labelText || name;
-      }
       const meta = document.createElement('div');
       meta.className = 'panel-field-group-meta';
       const badge = document.createElement('span');
       badge.className = 'panel-field-count-badge';
-      badge.textContent = list.length > 1 ? `${list.length} entries` : '1 entry';
+      badge.textContent = list.length > 1 ? `${list.length}` : '1';
       meta.appendChild(badge);
-      head.append(nameSpan, labelSpan, meta);
+      head.append(nameSpan, meta);
       card.appendChild(head);
 
       // Most-recent first.
@@ -311,31 +295,30 @@ function renderEntry(e: FieldEntry): HTMLElement {
 
   const row1 = document.createElement('div');
   row1.className = 'panel-field-entry-row';
-  const typeTag = document.createElement('span');
-  typeTag.className = `panel-field-type-tag panel-field-type-tag--${e.field_type}`;
-  typeTag.textContent = e.field_type;
-  row1.appendChild(typeTag);
 
+  // Show value (for simple types) or display_value + sys_id (for reference).
+  // Per user spec: don't show type tags; show the actual value that will
+  // be filled, and for reference fields show the sys_id since that's what
+  // actually gets written to the form.
   if (e.field_type === 'reference') {
-    const primary = document.createElement('span');
-    primary.className = 'panel-field-value-primary';
-    primary.textContent = e.ref_display_value || '(no display)';
-    row1.appendChild(primary);
+    const display = document.createElement('span');
+    display.className = 'panel-field-value-primary';
+    display.textContent = e.ref_display_value || '(no display)';
+    row1.appendChild(display);
     if (e.ref_sys_id) {
-      const meta = document.createElement('span');
-      meta.className = 'panel-field-value-meta';
-      meta.textContent = `sys_id ${abbrevSysId(e.ref_sys_id)}`;
-      row1.appendChild(meta);
+      const sysId = document.createElement('span');
+      sysId.className = 'panel-field-sysid';
+      sysId.textContent = abbrevSysId(e.ref_sys_id);
+      sysId.title = e.ref_sys_id;
+      row1.appendChild(sysId);
     }
   } else {
-    const primary = document.createElement('span');
-    primary.className = 'panel-field-value-primary';
-    primary.textContent =
-      e.value === '' || e.value === undefined ? '(empty)' : truncate(e.value, 48);
-    row1.appendChild(primary);
-    if (e.value !== undefined && e.value.length > 48) {
-      primary.title = e.value;
-    }
+    const val = document.createElement('span');
+    val.className = 'panel-field-value-primary';
+    const v = e.value ?? '';
+    val.textContent = v === '' ? '(empty)' : truncate(v, 48);
+    if (v.length > 48) val.title = v;
+    row1.appendChild(val);
   }
 
   const actions = document.createElement('div');
@@ -344,7 +327,7 @@ function renderEntry(e: FieldEntry): HTMLElement {
   del.type = 'button';
   del.className = 'panel-danger-button';
   del.title = 'Remove this entry from the library';
-  del.textContent = 'Delete';
+  del.textContent = '×';
   del.addEventListener('click', () => {
     if (confirm(`Delete this entry for ${e.field_name}?`)) {
       void deleteEntry(e.id);
@@ -354,28 +337,6 @@ function renderEntry(e: FieldEntry): HTMLElement {
   row1.appendChild(actions);
 
   wrapper.appendChild(row1);
-
-  // Secondary info line: table sys_id capture context, capture time.
-  if (e.table_sys_id) {
-    const row2 = document.createElement('div');
-    row2.className = 'panel-field-entry-row';
-    const captured = document.createElement('span');
-    captured.className = 'panel-field-value-meta';
-    captured.textContent = `captured from ${abbrevSysId(e.table_sys_id)} · ${new Date(
-      e.captured_at,
-    ).toLocaleString()}`;
-    row2.appendChild(captured);
-    wrapper.appendChild(row2);
-  } else {
-    const row2 = document.createElement('div');
-    row2.className = 'panel-field-entry-row';
-    const captured = document.createElement('span');
-    captured.className = 'panel-field-value-meta';
-    captured.textContent = `captured ${new Date(e.captured_at).toLocaleString()}`;
-    row2.appendChild(captured);
-    wrapper.appendChild(row2);
-  }
-
   return wrapper;
 }
 
@@ -450,16 +411,39 @@ function renderGroupCard(group: FieldGroup, shape: StorageShape): HTMLElement {
   const card = document.createElement('article');
   card.className = 'panel-group-card';
 
+  // --- Header: title + count + Fill button + collapse toggle ---
   const head = document.createElement('div');
   head.className = 'panel-group-card-head';
+
+  const toggle = document.createElement('button');
+  toggle.type = 'button';
+  toggle.className = 'panel-collapse-toggle';
+  toggle.title = 'Collapse/expand';
+  toggle.setAttribute('aria-expanded', 'true');
+  toggle.textContent = '▼';
+
   const title = document.createElement('h3');
   title.className = 'panel-group-card-title';
   title.textContent = group.name;
+
   const pill = document.createElement('span');
   pill.className = 'panel-meta';
-  pill.textContent = `${group.items.length} item${group.items.length === 1 ? '' : 's'}`;
-  head.append(title, pill);
+  pill.textContent = `${group.items.length}`;
 
+  const fillBtn = document.createElement('button');
+  fillBtn.type = 'button';
+  fillBtn.className = 'panel-primary-button panel-group-fill-btn';
+  fillBtn.textContent = 'Fill';
+  fillBtn.disabled = group.items.length === 0;
+  fillBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    void runFillGroup(group, shape);
+  });
+
+  head.append(toggle, title, pill, fillBtn);
+  card.appendChild(head);
+
+  // --- Collapsible items body ---
   const items = document.createElement('ul');
   items.className = 'panel-group-items';
   if (group.items.length === 0) {
@@ -472,44 +456,44 @@ function renderGroupCard(group: FieldGroup, shape: StorageShape): HTMLElement {
       const entry = shape.fields[it.entry_ref];
       const li = document.createElement('li');
       li.className = 'panel-group-item';
-      const name = document.createElement('span');
-      name.className = 'panel-group-item-name';
+
+      const label = document.createElement('span');
+      label.className = 'panel-group-item-name';
       if (!entry) {
-        name.textContent = `(removed: ${it.entry_ref.slice(0, 8)})`;
-        name.classList.add('panel-error');
+        label.textContent = `(removed: ${it.entry_ref.slice(0, 8)})`;
+        label.classList.add('panel-error');
       } else {
-        name.textContent = displayFieldName(entry);
-        const tag = document.createElement('span');
-        tag.className = `panel-type-tag panel-type-tag--${entry.field_type}`;
-        tag.textContent = entry.field_type;
-        li.appendChild(tag);
+        label.textContent = displayFieldName(entry);
       }
+
       const val = document.createElement('span');
       val.className = 'panel-group-item-value';
       if (entry && entry.field_type === 'reference') {
-        val.textContent = entry.ref_display_value ?? '(no display)';
-        val.classList.add('panel-meta');
+        // Show display value + abbreviated sys_id
+        const disp = entry.ref_display_value ?? '(no display)';
+        const sysId = entry.ref_sys_id ? ` · ${abbrevSysId(entry.ref_sys_id)}` : '';
+        val.textContent = `${disp}${sysId}`;
+        val.title = entry.ref_sys_id ?? '';
       } else if (entry) {
         const v = it.override_value ?? entry.value ?? '';
-        val.textContent = v.length > 32 ? v.slice(0, 32) + '…' : v || '(blank)';
+        val.textContent = v.length > 40 ? v.slice(0, 40) + '…' : v || '(blank)';
         val.title = v;
       }
-      li.append(name, val);
+
+      li.append(label, val);
       items.appendChild(li);
     }
   }
+  card.appendChild(items);
 
-  const actions = document.createElement('div');
-  actions.className = 'panel-group-card-actions';
-  const fillBtn = document.createElement('button');
-  fillBtn.type = 'button';
-  fillBtn.className = 'panel-primary-button';
-  fillBtn.textContent = group.items.length === 0 ? 'No items to fill' : 'Fill';
-  fillBtn.disabled = group.items.length === 0;
-  fillBtn.addEventListener('click', () => void runFillGroup(group, shape));
-  actions.appendChild(fillBtn);
+  // --- Collapse wiring ---
+  toggle.addEventListener('click', () => {
+    const expanded = toggle.getAttribute('aria-expanded') === 'true';
+    toggle.setAttribute('aria-expanded', String(!expanded));
+    toggle.textContent = !expanded ? '▼' : '▶';
+    items.hidden = expanded;
+  });
 
-  card.append(head, items, actions);
   return card;
 }
 
@@ -538,15 +522,39 @@ function wireGroupsShortcuts(): void {
   const btn = document.getElementById('btn-groups-settings');
   btn?.addEventListener('click', () => {
     if (chrome.runtime?.openOptionsPage) {
+      // openOptionsPage opens the options page; to auto-switch to the
+      // Groups tab we pass a query param via chrome.storage.session as
+      // a "next tab" hint that the options page reads on init.
       void (async () => {
+        try {
+          await chrome.storage.session.set({ __options_tab_hint: 'groups' });
+        } catch {
+          /* session storage may be unavailable; options falls back to Field Library */
+        }
         await chrome.runtime.openOptionsPage();
-        // Open options then jump to groups tab — the options page reads
-        // `?tab=groups` or defaults to Field Library, so here we append
-        // a small storage hint the options page listens for if present.
-        // For simplicity in MVP we just open options; users can click
-        // the Groups tab.
       })();
     }
+  });
+}
+
+/** Wire the Field Library section collapse toggle (default collapsed). */
+function wireFieldLibCollapse(): void {
+  const toggle = document.querySelector<HTMLButtonElement>(
+    '#section-fields .panel-collapse-toggle',
+  );
+  const body = document.querySelector<HTMLElement>(
+    '.panel-collapsible-body[data-for="fields-root"]',
+  );
+  if (!toggle || !body) return;
+  // Default: collapsed.
+  toggle.setAttribute('aria-expanded', 'false');
+  toggle.textContent = '▶';
+  body.hidden = true;
+  toggle.addEventListener('click', () => {
+    const expanded = toggle.getAttribute('aria-expanded') === 'true';
+    toggle.setAttribute('aria-expanded', String(!expanded));
+    toggle.textContent = !expanded ? '▼' : '▶';
+    body.hidden = expanded;
   });
 }
 
@@ -559,6 +567,7 @@ async function init(): Promise<void> {
   wireSettingsButton();
   wirePickerButtons();
   wireGroupsShortcuts();
+  wireFieldLibCollapse();
   const initial = await readStorage();
   renderAll(initial);
   onStorageChanged(renderAll);

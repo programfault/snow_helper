@@ -640,6 +640,31 @@ function renderAll(shape: StorageShape): void {
 
 async function init(): Promise<void> {
   wireTabs();
+  // Check for a "next tab" hint left by the side panel's "Manage Groups"
+  // button (or any other caller that wants to deep-link into a tab).
+  let initialTab = 'fields';
+  try {
+    const hint = await chrome.storage.session.get('__options_tab_hint');
+    if (hint?.__options_tab_hint) {
+      initialTab = String(hint.__options_tab_hint);
+      await chrome.storage.session.remove('__options_tab_hint');
+    }
+  } catch {
+    /* session storage may be unavailable */
+  }
+  // Activate the requested tab if it exists.
+  const tabs = Array.from(
+    document.querySelectorAll<HTMLButtonElement>('.options-tab'),
+  );
+  const targetTab = tabs.find((t) => t.dataset.tab === initialTab) ?? tabs[0];
+  if (targetTab) {
+    for (const t of tabs) t.classList.toggle('is-active', t === targetTab);
+    for (const panel of Array.from(document.querySelectorAll<HTMLElement>('.options-panel'))) {
+      const active = panel.id === `tab-${targetTab.dataset.tab}`;
+      panel.classList.toggle('is-active', active);
+      panel.hidden = !active;
+    }
+  }
   const initial = await readStorage();
   lastShape = initial;
   renderAll(initial);
