@@ -271,12 +271,20 @@ function drawRect(el: Element): void {
 
   // Label: field_name + type. We inspect the element's name attribute and
   // our own shallow classification (cheap — not a full capture).
-  const name = el.getAttribute('name') || el.getAttribute('data-name') ||
+  const rawName = el.getAttribute('name') || el.getAttribute('data-name') ||
     (el.id ? `#${el.id}` : '(unnamed)');
+  // Resolve sys_display. prefix to show the real SN field name in tooltip.
+  let name = rawName;
+  if (rawName.startsWith('sys_display.original.')) {
+    name = rawName.slice('sys_display.original.'.length);
+  } else if (rawName.startsWith('sys_display.')) {
+    name = rawName.slice('sys_display.'.length);
+  }
   const tag = el.tagName.toLowerCase();
   const typeAttr = (el as HTMLInputElement).type?.toLowerCase() || '';
   let cls = 'string';
-  if (tag === 'textarea') cls = 'journal';
+  if (rawName !== name) cls = 'reference';
+  else if (tag === 'textarea') cls = 'journal';
   else if (typeAttr === 'checkbox') cls = 'boolean';
   else if (typeAttr === 'number') cls = 'integer';
   else if (typeAttr === 'date' || typeAttr === 'datetime-local' || typeAttr === 'time') cls = 'datetime';
@@ -333,8 +341,22 @@ async function captureFromElement(el: Element): Promise<FieldEntry | null> {
   const root = findFieldRoot(el);
   if (!root) return null;
   const tag = root.tagName.toLowerCase();
-  const fieldName = root.getAttribute('name');
-  if (!fieldName) return null;
+  const rawFieldName = root.getAttribute('name');
+  if (!rawFieldName) return null;
+
+  // Resolve ServiceNow reference field name conventions:
+  //   Visible display input: name = "sys_display.incident.xxx"
+  //   Hidden sys_id input:   name = "incident.xxx"
+  //                          OR name = "sys_display.original.incident.xxx"
+  // We store with the REAL field name (incident.xxx) so g_form.setValue
+  // works correctly and DOM fallback can find the hidden sys_id input.
+  let fieldName = rawFieldName;
+  if (rawFieldName.startsWith('sys_display.original.')) {
+    fieldName = rawFieldName.slice('sys_display.original.'.length);
+  } else if (rawFieldName.startsWith('sys_display.')) {
+    fieldName = rawFieldName.slice('sys_display.'.length);
+  }
+
   // Grab label: either nearest ancestor with a label[for=<id>] matching the
   // root id, or first .control-label / label-form in the wrapping form-group.
   const rootId = root.id || root.getAttribute('aria-labelledby') || '';
@@ -357,6 +379,12 @@ async function captureFromElement(el: Element): Promise<FieldEntry | null> {
   const fromGform = gFormInfo?.field_type;
   let fieldType: FieldType = fromGform || classifyTypeFromDom(tag, typeAttr, root);
 
+  // If the visible input name had sys_display. prefix, this is definitely
+  // a reference field even if g_form/DOM didn't classify it as one.
+  if (rawFieldName !== fieldName) {
+    fieldType = 'reference';
+  }
+
   const base: Omit<FieldEntry, 'id' | 'captured_at'> = {
     field_name: fieldName,
     label,
@@ -366,25 +394,42 @@ async function captureFromElement(el: Element): Promise<FieldEntry | null> {
 
   // Fill value/display/sys_id
   if (fieldType === 'reference') {
+    // The visible display input value (what the user sees on the form).
+    const visibleValue = (root as HTMLInputElement).value || undefined;
     base.ref_sys_id = gFormInfo?.ref_sys_id || undefined;
-    base.ref_display_value = gFormInfo?.ref_display_value ||
-      (root as HTMLInputElement).value ||
-      undefined;
-    // reference lookup often stores the real display in a separate
-    // text node — the lookup <input id="xxx_display"> sibling
+    base.ref_display_value = gFormInfo?.ref_display_value || visibleValue || undefined;
+
+    // Look for the hidden sys_id input(s). ServiceNow stores the real
+    // sys_id in a hidden field whose name is either:
+    //   - the real field name (e.g. "incident.u_application_service")
+    //   - "sys_display.original." + real field name
+    const hiddenByName = document.querySelector<HTMLInputElement>(
+      `input[name="${fieldName}"]`,
+    );
+    const hiddenByOriginal = document.querySelector<HTMLInputElement>(
+      `input[name="sys_display.original.${fieldName}"]`,
+    );
+    // Also try the old _display sibling.
     const displayInput = document.getElementById(`${rootId || fieldName}_display`) as
       | HTMLInputElement
       | null;
+
+    // Extract sys_id from hidden fields (g_form is authoritative, but DOM
+    // is a fallback when g_form isn't available).
+    for (const hidden of [hiddenByName, hiddenByOriginal]) {
+      if (!hidden || !hidden.value || base.ref_sys_id) continue;
+      if (isLikelySysId(hidden.value)) {
+        base.ref_sys_id = hidden.value;
+      }
+    }
+
     if (displayInput && !base.ref_display_value) {
       base.ref_display_value = displayInput.value;
     }
-    // If the name-matching input holds the sys_id as its value, use that
-    const sysIdInput = rootId
-      ? (document.getElementById(rootId) as HTMLInputElement | null)
-      : null;
-    if (sysIdInput && sysIdInput.value && !base.ref_sys_id) {
-      const v = sysIdInput.value;
-      if (isLikelySysId(v)) base.ref_sys_id = v;
+    // If the root itself is the hidden sys_id field (user clicked the
+    // hidden one), its value IS the sys_id.
+    if (!base.ref_sys_id && visibleValue && isLikelySysId(visibleValue)) {
+      base.ref_sys_id = visibleValue;
     }
   } else {
     base.value = (root as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement).value ?? '';
@@ -802,12 +847,22 @@ function setReferenceByDom(
   sysId: string,
   displayValue: string | undefined,
 ): FillResult {
-  const hidden =
-    document.querySelector<HTMLInputElement>(`input[name="${fieldName}"]`);
+  // ServiceNow reference fields have up to 3 related inputs:
+  //   1. <input name="<field>" />                        — hidden, holds sys_id
+  //   2. <input name="sys_display.<field>" />             — visible display value
+  //   3. <input name="sys_display.original.<field>" />    — hidden, also sys_id
+  // All three must be set for SN's save to recognize the change; setting
+  // only the visible input is NOT enough (SN's model reads from hidden).
+  const hidden = document.querySelector<HTMLInputElement>(`input[name="${fieldName}"]`);
   const display =
     document.querySelector<HTMLInputElement>(`input[name="sys_display.${fieldName}"]`) ??
     document.querySelector<HTMLInputElement>(`input[id="${fieldName}_display"]`);
-  if (!hidden) return { ok: false, error: `no sys_id input for name="${fieldName}"` };
+  const originalHidden = document.querySelector<HTMLInputElement>(
+    `input[name="sys_display.original.${fieldName}"]`,
+  );
+  if (!hidden && !originalHidden) {
+    return { ok: false, error: `no sys_id input for name="${fieldName}"` };
+  }
   const fire = (el: HTMLElement, v: string) => {
     try {
       const proto = Object.getPrototypeOf(el);
@@ -821,7 +876,8 @@ function setReferenceByDom(
       console.warn('[sn-helper] dom fallback set failed', el, err);
     }
   };
-  fire(hidden, sysId);
+  if (hidden) fire(hidden, sysId);
+  if (originalHidden) fire(originalHidden, sysId);
   if (display && displayValue !== undefined) fire(display, displayValue);
   return { ok: true };
 }

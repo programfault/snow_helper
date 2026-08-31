@@ -381,18 +381,6 @@ function wireSettingsButton(): void {
   });
 }
 
-function wireCloseButton(): void {
-  const btn = document.getElementById('btn-close-panel');
-  btn?.addEventListener('click', () => {
-    // window.close() in a side panel context closes the panel.
-    try {
-      window.close();
-    } catch {
-      /* ignore */
-    }
-  });
-}
-
 // ==========================================================================
 // Groups: rendering and Fill buttons
 // ==========================================================================
@@ -568,7 +556,6 @@ function renderAll(shape: StorageShape): void {
 
 async function init(): Promise<void> {
   wireSettingsButton();
-  wireCloseButton();
   wirePickerButtons();
   wireGroupsShortcuts();
   wireFieldLibCollapse();

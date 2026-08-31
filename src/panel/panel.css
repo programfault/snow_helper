@@ -57,17 +57,6 @@ body {
   min-height: 0;
 }
 
-.panel-titlebar {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  padding: 4px 10px;
-  background: var(--brand-soft);
-  border-bottom: 1px solid var(--border);
-  flex: 0 0 auto;
-  gap: 6px;
-}
-
 .panel-icon-button {
   appearance: none;
   border: 1px solid var(--border-strong);
