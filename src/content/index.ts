@@ -18,12 +18,16 @@ import { uuid } from '../shared/messages';
 
 let pickerActive = false;
 let highlighted: Element | null = null;
-let pickerMask: HTMLElement | null = null;
-let pickerBadge: HTMLElement | null = null;
+let pickerMask: HTMLElement | null = null;      // fixed overlay container (no pointer events)
+let pickerBadge: HTMLElement | null = null;     // bottom status pill
+let pickerRect: HTMLElement | null = null;      // DevTools-style selection highlight rect
+let pickerTooltip: HTMLElement | null = null;  // DevTools-style field name / type label
 let teardownHandlers: Array<() => void> = [];
+let rafPending: number | null = null;
 
-const PICKER_HIGHLIGHT_BORDER = '2px solid #3b82f6';
-const PICKER_HIGHLIGHT_BG = 'rgba(59,130,246,0.12)';
+// (Colors for the DevTools-style selection rect are now baked inline into
+// the overlay element styles in drawRect / startPicker so they don't need
+// a separate named constant.)
 
 function ensureInjected(): void {
   // This file IS the content script; just wire the chrome message listener.
@@ -62,6 +66,9 @@ function ensureInjected(): void {
 async function startPicker(): Promise<void> {
   if (pickerActive) return;
   pickerActive = true;
+
+  // Fixed container for overlay assets (rect, tooltip). pointer-events:none
+  // so hover/click pass through to the real page.
   pickerMask = document.createElement('div');
   pickerMask.setAttribute(
     'style',
@@ -70,10 +77,56 @@ async function startPicker(): Promise<void> {
       'inset:0',
       'pointer-events:none',
       'z-index:2147483646',
+      'contain:layout style paint',
     ].join(';'),
   );
   document.documentElement.appendChild(pickerMask);
 
+  // DevTools-style selection rect (the actual "selection box").
+  pickerRect = document.createElement('div');
+  pickerRect.setAttribute(
+    'style',
+    [
+      'position:fixed',
+      'top:0',
+      'left:0',
+      'width:0',
+      'height:0',
+      'box-sizing:border-box',
+      'border:2px solid #3b82f6',
+      'background:rgba(59,130,246,0.12)',
+      'box-shadow:0 0 0 1px rgba(255,255,255,0.6) inset, 0 0 0 4000px rgba(15,23,42,0.12)',
+      'border-radius:2px',
+      'transition:all 40ms linear',
+      'display:none',
+    ].join(';'),
+  );
+  pickerMask.appendChild(pickerRect);
+
+  // DevTools-style tooltip showing field name + type.
+  pickerTooltip = document.createElement('div');
+  pickerTooltip.setAttribute(
+    'style',
+    [
+      'position:fixed',
+      'top:0',
+      'left:0',
+      'max-width:320px',
+      'padding:4px 8px',
+      'background:#0b1324',
+      'color:#e5edf3',
+      'border-radius:4px',
+      'font:400 11px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace',
+      'box-shadow:0 6px 16px rgba(15,23,42,0.35)',
+      'white-space:nowrap',
+      'overflow:hidden',
+      'text-overflow:ellipsis',
+      'display:none',
+    ].join(';'),
+  );
+  pickerMask.appendChild(pickerTooltip);
+
+  // Status pill at the bottom of the viewport.
   pickerBadge = document.createElement('div');
   pickerBadge.textContent = 'SN Helper picker active — click a field, Esc to cancel';
   pickerBadge.setAttribute(
@@ -90,16 +143,27 @@ async function startPicker(): Promise<void> {
       'font:12px/1.4 -apple-system,system-ui,sans-serif',
       'z-index:2147483647',
       'backdrop-filter:blur(6px)',
+      'pointer-events:none',
     ].join(';'),
   );
   document.documentElement.appendChild(pickerBadge);
 
+  // ---- Event handlers (capture phase so the page cannot stop us). ----
   const onMouseOver = (e: MouseEvent) => {
     const target = e.target as Element | null;
     if (!target) return;
-    highlight(target);
+    const root = findFieldRoot(target);
+    highlight(root ?? target);
   };
-  const onMouseOut = () => clearHighlight();
+  const onMouseMove = (e: MouseEvent) => {
+    // If highlight is anchored to a scrollable container, re-sync rect on
+    // every frame; mouseMove triggers that re-sync.
+    void e;
+    if (highlighted) scheduleRectSync();
+  };
+  const onScroll = () => {
+    if (highlighted) scheduleRectSync();
+  };
   const onClick = async (e: MouseEvent) => {
     const target = e.target as Element | null;
     if (!target) return;
@@ -125,12 +189,14 @@ async function startPicker(): Promise<void> {
   };
 
   window.addEventListener('mouseover', onMouseOver, true);
-  window.addEventListener('mouseout', onMouseOut, true);
+  window.addEventListener('mousemove', onMouseMove, true);
+  window.addEventListener('scroll', onScroll, true);
   window.addEventListener('click', onClick, true);
   window.addEventListener('keydown', onKey, true);
   teardownHandlers.push(
     () => window.removeEventListener('mouseover', onMouseOver, true),
-    () => window.removeEventListener('mouseout', onMouseOut, true),
+    () => window.removeEventListener('mousemove', onMouseMove, true),
+    () => window.removeEventListener('scroll', onScroll, true),
     () => window.removeEventListener('click', onClick, true),
     () => window.removeEventListener('keydown', onKey, true),
   );
@@ -139,9 +205,15 @@ async function startPicker(): Promise<void> {
 function stopPicker(reason: string): void {
   if (!pickerActive) return;
   pickerActive = false;
+  if (rafPending !== null) cancelAnimationFrame(rafPending);
+  rafPending = null;
   clearHighlight();
   teardownHandlers.forEach((h) => h());
   teardownHandlers = [];
+  pickerRect?.remove();
+  pickerRect = null;
+  pickerTooltip?.remove();
+  pickerTooltip = null;
   pickerMask?.remove();
   pickerMask = null;
   pickerBadge?.remove();
@@ -149,24 +221,86 @@ function stopPicker(reason: string): void {
   console.log('[sn-helper] picker stopped:', reason);
 }
 
+/**
+ * Throttled rect/layout sync. Scrolls and mousemoves fire fast; we only
+ * need to update the overlay rect once per frame.
+ */
+function scheduleRectSync(): void {
+  if (rafPending !== null) return;
+  rafPending = requestAnimationFrame(() => {
+    rafPending = null;
+    if (highlighted) drawRect(highlighted);
+  });
+}
+
+/**
+ * Draw the DevTools-style selection rect and label over the given
+ * element. We never mutate the element's own inline styles — the rect
+ * and tooltip are sibling overlay nodes in pickerMask.
+ */
 function highlight(el: Element): void {
-  clearHighlight();
+  if (highlighted === el) {
+    scheduleRectSync();
+    return;
+  }
   highlighted = el;
-  const prevBorder = getComputedStyle(el).outline;
-  (el as HTMLElement).style.outline = PICKER_HIGHLIGHT_BORDER;
-  (el as HTMLElement).style.outlineOffset = '-1px';
-  (el as HTMLElement).style.backgroundColor = PICKER_HIGHLIGHT_BG;
-  (el as HTMLElement).setAttribute('data-sn-helper-picker-prev-border', prevBorder || '');
+  drawRect(el);
+}
+
+function drawRect(el: Element): void {
+  if (!pickerRect || !pickerTooltip) return;
+  const r = el.getBoundingClientRect();
+  // Guard against invisible / off-viewport elements.
+  if (r.width <= 0 && r.height <= 0) {
+    pickerRect.style.display = 'none';
+    pickerTooltip.style.display = 'none';
+    return;
+  }
+  const vw = document.documentElement.clientWidth;
+  const vh = document.documentElement.clientHeight;
+  const top = Math.max(0, r.top);
+  const left = Math.max(0, r.left);
+  const width = Math.min(vw - left, r.right - left);
+  const height = Math.min(vh - top, r.bottom - top);
+
+  pickerRect.style.display = 'block';
+  pickerRect.style.top = `${top}px`;
+  pickerRect.style.left = `${left}px`;
+  pickerRect.style.width = `${width}px`;
+  pickerRect.style.height = `${height}px`;
+
+  // Label: field_name + type. We inspect the element's name attribute and
+  // our own shallow classification (cheap — not a full capture).
+  const name = el.getAttribute('name') || el.getAttribute('data-name') ||
+    (el.id ? `#${el.id}` : '(unnamed)');
+  const tag = el.tagName.toLowerCase();
+  const typeAttr = (el as HTMLInputElement).type?.toLowerCase() || '';
+  let cls = 'string';
+  if (tag === 'textarea') cls = 'journal';
+  else if (typeAttr === 'checkbox') cls = 'boolean';
+  else if (typeAttr === 'number') cls = 'integer';
+  else if (typeAttr === 'date' || typeAttr === 'datetime-local' || typeAttr === 'time') cls = 'datetime';
+  else if (el.closest('.reference, .input-group-btn .icon-search, .lookup')) cls = 'reference';
+
+  pickerTooltip.textContent = `${name}  ·  ${cls}`;
+  pickerTooltip.style.display = 'block';
+  // Position tooltip above the rect; flip below if no room above.
+  const labelWidth = Math.min(320, pickerTooltip.offsetWidth || 220);
+  const labelHeight = 22;
+  let tx = left;
+  let ty = top - labelHeight - 4;
+  if (ty < 0) ty = top + height + 4;
+  if (ty + labelHeight > vh) ty = top - labelHeight - 4;
+  if (tx + labelWidth > vw) tx = vw - labelWidth - 4;
+  if (tx < 0) tx = 0;
+  pickerTooltip.style.top = `${ty}px`;
+  pickerTooltip.style.left = `${tx}px`;
 }
 
 function clearHighlight(): void {
-  if (!highlighted) return;
-  (highlighted as HTMLElement).style.outline = (
-    highlighted as HTMLElement
-  ).getAttribute('data-sn-helper-picker-prev-border') || '';
-  (highlighted as HTMLElement).style.backgroundColor = '';
-  (highlighted as HTMLElement).removeAttribute('data-sn-helper-picker-prev-border');
   highlighted = null;
+  if (pickerRect) pickerRect.style.display = 'none';
+  if (pickerTooltip) pickerTooltip.style.display = 'none';
 }
 
 // ===========================================================================
