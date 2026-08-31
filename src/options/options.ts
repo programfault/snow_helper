@@ -197,8 +197,8 @@ function renderFieldRow(entry: FieldEntry): HTMLTableRowElement {
 
 /** Live dialog state; null = dialog closed. */
 let dialogState:
-  | { mode: 'new'; name: string; items: FieldGroupItem[] }
-  | { mode: 'edit'; id: string; name: string; items: FieldGroupItem[] }
+  | { mode: 'new'; name: string; description: string; items: FieldGroupItem[] }
+  | { mode: 'edit'; id: string; name: string; description: string; items: FieldGroupItem[] }
   | null = null;
 
 function renderGroups(shape: StorageShape): void {
@@ -228,7 +228,33 @@ function renderGroupCard(group: FieldGroup, shape: StorageShape): HTMLElement {
   editBtn.type = 'button';
   editBtn.className = 'options-ghost-button';
   editBtn.textContent = 'Edit';
-  editBtn.addEventListener('click', () => openGroupDialog({ mode: 'edit', id: group.id, name: group.name, items: group.items.slice() }));
+  editBtn.addEventListener('click', () => openGroupDialog({ mode: 'edit', id: group.id, name: group.name, description: group.description ?? '', items: group.items.slice() }));
+  const copyBtn = document.createElement('button');
+  copyBtn.type = 'button';
+  copyBtn.className = 'options-ghost-button';
+  copyBtn.textContent = 'Copy';
+  copyBtn.title = 'Duplicate this group';
+  copyBtn.addEventListener('click', async () => {
+    const id = uuid();
+    const now = Date.now();
+    await mutateStorage((cur) => ({
+      storage: {
+        ...cur,
+        groups: {
+          ...cur.groups,
+          [id]: {
+            id,
+            name: `${group.name} (copy)`,
+            description: group.description,
+            items: group.items.slice(),
+            created_at: now,
+            updated_at: now,
+          },
+        },
+      },
+      result: undefined,
+    }));
+  });
   const delBtn = document.createElement('button');
   delBtn.type = 'button';
   delBtn.className = 'options-danger-button';
@@ -241,9 +267,17 @@ function renderGroupCard(group: FieldGroup, shape: StorageShape): HTMLElement {
       return { storage: { ...cur, groups: next }, result: undefined };
     });
   });
-  actions.append(editBtn, delBtn);
+  actions.append(editBtn, copyBtn, delBtn);
   head.append(name, meta, actions);
   card.appendChild(head);
+
+  // Show description below the header if present.
+  if (group.description) {
+    const desc = document.createElement('p');
+    desc.className = 'group-card-description';
+    desc.textContent = group.description;
+    card.appendChild(desc);
+  }
 
   const itemsList = document.createElement('ol');
   itemsList.className = 'group-card-items';
@@ -305,10 +339,12 @@ function openGroupDialog(state: NonNullable<typeof dialogState>): void {
   const dlg = $<HTMLDialogElement>('group-dialog');
   const title = $<HTMLHeadingElement>('group-dialog-title');
   const nameInput = $<HTMLInputElement>('group-name');
+  const descInput = $<HTMLTextAreaElement>('group-description');
   const itemsList = $<HTMLOListElement>('group-items');
   title.textContent = state.mode === 'new' ? 'New Group' : `Edit Group: ${state.name}`;
   nameInput.value = state.name;
   nameInput.required = true;
+  descInput.value = state.description;
   renderGroupItemsList(itemsList, state.items);
   // Reset search box + close search results.
   const search = $<HTMLInputElement>('entry-search');
@@ -589,6 +625,8 @@ function wireGroupDialog(): void {
       nameInput.reportValidity();
       return;
     }
+    const descInput = $<HTMLTextAreaElement>('group-description');
+    const description = descInput.value.trim();
     const items = dialogState.items.slice();
     if (dialogState.mode === 'new') {
       const id = uuid();
@@ -598,7 +636,7 @@ function wireGroupDialog(): void {
           ...cur,
           groups: {
             ...cur.groups,
-            [id]: { id, name, items, created_at: now, updated_at: now },
+            [id]: { id, name, description, items, created_at: now, updated_at: now },
           },
         },
         result: undefined,
@@ -612,7 +650,7 @@ function wireGroupDialog(): void {
             ...cur,
             groups: {
               ...cur.groups,
-              [g.id]: { ...g, name, items, updated_at: Date.now() },
+              [g.id]: { ...g, name, description, items, updated_at: Date.now() },
             },
           },
           result: undefined,
@@ -622,7 +660,7 @@ function wireGroupDialog(): void {
     closeGroupDialog();
   });
   $<HTMLButtonElement>('btn-new-group').addEventListener('click', () =>
-    openGroupDialog({ mode: 'new', name: '', items: [] })
+    openGroupDialog({ mode: 'new', name: '', description: '', items: [] })
   );
 }
 

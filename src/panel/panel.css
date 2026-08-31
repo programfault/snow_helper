@@ -391,11 +391,32 @@ body {
   font-size: 13px;
   font-weight: 700;
   color: var(--text);
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Inline description: shown on the right of the title when the card
+   is collapsed. Truncated with ellipsis; full text in title tooltip. */
+.panel-group-card-desc-inline {
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+/* Block description: shown below the header when the card is expanded. */
+.panel-group-card-desc-block {
+  margin: 2px 0 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.4;
+  white-space: pre-wrap;
 }
 
 .panel-group-fill-btn {

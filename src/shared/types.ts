@@ -59,6 +59,8 @@ export interface FieldGroupItem {
 export interface FieldGroup {
   id: string;
   name: string;
+  /** Optional human-readable note explaining what this group is for. */
+  description?: string;
   items: FieldGroupItem[];
   created_at: number;
   updated_at: number;

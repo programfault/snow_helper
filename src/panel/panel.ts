@@ -417,6 +417,22 @@ function renderGroupCard(group: FieldGroup, shape: StorageShape): HTMLElement {
   title.className = 'panel-group-card-title';
   title.textContent = group.name;
 
+  // Description: shown inline on the right when collapsed, below title
+  // when expanded. Long text is truncated with CSS text-overflow: ellipsis;
+  // the full text is in the title attribute for hover tooltip.
+  let descInline: HTMLSpanElement | null = null;
+  let descBlock: HTMLParagraphElement | null = null;
+  if (group.description) {
+    descInline = document.createElement('span');
+    descInline.className = 'panel-group-card-desc-inline';
+    descInline.textContent = group.description;
+    descInline.title = group.description;
+
+    descBlock = document.createElement('p');
+    descBlock.className = 'panel-group-card-desc-block';
+    descBlock.textContent = group.description;
+  }
+
   const pill = document.createElement('span');
   pill.className = 'panel-meta';
   pill.textContent = `${group.items.length}`;
@@ -431,8 +447,16 @@ function renderGroupCard(group: FieldGroup, shape: StorageShape): HTMLElement {
     void runFillGroup(group, shape);
   });
 
-  head.append(toggle, title, pill, fillBtn);
+  // Build header: toggle, title, inline-desc (visible when collapsed),
+  // pill, fill button.
+  const headChildren: HTMLElement[] = [toggle, title];
+  if (descInline) headChildren.push(descInline);
+  headChildren.push(pill, fillBtn);
+  head.append(...headChildren);
   card.appendChild(head);
+
+  // Description block (visible only when expanded).
+  if (descBlock) card.appendChild(descBlock);
 
   // --- Collapsible items body ---
   const items = document.createElement('ul');
@@ -483,7 +507,14 @@ function renderGroupCard(group: FieldGroup, shape: StorageShape): HTMLElement {
     toggle.setAttribute('aria-expanded', String(!expanded));
     toggle.textContent = !expanded ? '▼' : '▶';
     items.hidden = expanded;
+    // When expanded: hide inline desc (it's in the block below).
+    // When collapsed: show inline desc, hide the block.
+    if (descInline) descInline.hidden = !expanded;  // visible only when collapsed
+    if (descBlock) descBlock.hidden = expanded;       // visible only when expanded
   });
+  // Initial state: expanded → inline hidden, block visible.
+  if (descInline) descInline.hidden = true;
+  if (descBlock) descBlock.hidden = false;
 
   return card;
 }

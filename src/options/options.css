@@ -437,6 +437,14 @@ body {
   color: var(--text);
 }
 
+.group-card-description {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
 .group-card-head .options-meta {
   grid-row: 2;
   grid-column: 1;
