@@ -1,12 +1,12 @@
 # Progress
 
-> Anchor for what is done, what is next, and what is open. Update this file at
-> the end of every working session so the next session can resume without
+> Anchor for what is done, what is next, and what is open. Update this file
+> at the end of every working session so the next session can resume without
 > re-reading the whole conversation.
 
 ## Current phase
 
-**Phase 2 — Element picker + Field Library** — status: **implemented, typecheck passes, awaiting manual test on a ServiceNow form page**
+**Phase 3 — Business groups + form fill** — status: **ready to start.**
 
 ## Phase status
 
@@ -14,25 +14,98 @@
 | ---------------------------------- | ----------- | ----------------------------------------------------------------------- |
 | 0 — Project skeleton               | done        | build verified, dev server runs, loadable                               |
 | 1 — Side panel                     | done        | Chrome Side Panel API (browser-native, no overlap)                      |
-| 2 — Element picker + field library | implemented | hover highlight, click capture, g_form MAIN-world probe, dedupe, field library grouped by field_name with type tags + display value + sys_id abbrev, persistent in chrome.storage.local; manual test pending |
-| 3 — Business groups + fill         | pending     | group CRUD in options, panel fill via g_form.setValue 3-arg             |
+| 2 — Element picker + field library | done        | DevTools-style overlay rect, MAIN-world g_form probe, dedupe, static content_scripts + force-inject fallback, user-verified |
+| 2.5 — Field aliases                | done        | `FieldEntry.alias` added; panel uses alias-or-label-or-field_name display with hover title; options Field Library tab has per-row alias editor + delete + raw columns |
+| 3 — Business groups + fill         | ready       | group CRUD in options, panel fill via g_form.setValue 3-arg             |
 | 4 — Remote services                | pending     | options CRUD, SW fetch with token header injection                      |
 | 5 — Token capture                  | pending     | dynamic (domain, localStorage key) config, content→storage→SW           |
 
-## Pivot recap (Phase 1 → 2)
+---
 
-The panel-host iframe approach (Phase 1 first draft) was replaced by the
-Chrome Side Panel API (Chrome 114+). This eliminated the body-margin push
-problems on ServiceNow workspace (fixed-position full-viewport SPA) and
-also changed the panel ↔ content communication channel from
-`window.postMessage` to **`chrome.runtime.sendMessage` + SW routing**:
+## Done in Phase 2.5 (Aliases)
 
-- **panel → content**: `chrome.runtime.sendMessage(PANEL_*)` → SW
-  `onMessage` → resolve active tab → `ensureContentScriptInjected` (ping
-  + inject via `files: [src/content/index.ts]`) →
-  `chrome.tabs.sendMessage(tabId, msg)`
-- **content → panel**: `chrome.runtime.sendMessage(CONTENT_*)` → panel
-  `onMessage` filtered by `sender.tab.id === activeTabId`
+* [x] `src/shared/types.ts` — added optional `FieldEntry.alias?: string`
+      with semantic comment (display priority chain: alias → label →
+      field_name; editable only in options Field Library tab). Kept
+      `table_sys_id` name for backwards compatibility with existing data.
+* [x] `src/panel/panel.ts` — added two pure helpers (`displayFieldName`,
+      `fieldNameTitle`) that encapsulate the alias/label/field_name
+      priority + tooltip. Applied them to the Field Library group card
+      header (bold primary display uses alias; pill uses alias if set;
+      row-level entry tooltips show all three names on hover).
+* [x] `src/options/options.ts` — rewrote options page:
+      * `wireTabs()` now guarantees panel.hidden state matches CSS active
+        class (fixes previous bug where `is-active` only set the class
+        and relied on CSS without actually hiding/showing panels).
+      * Added `renderFieldLibrary()` that renders a full HTML table
+        (columns: **Alias** (editable input), **Type** (colorized tag),
+        **Label**, **Field name** (mono bold), **Preset value** (disp +
+        sys_id for refs, truncated with tooltip for strings, **dim
+        (empty)** for blanks), **Captured** date, **Delete** button).
+      * `alias` input commits on blur or Enter key; writes single-field
+        mutation via `mutateStorage`.
+      * Delete button uses confirm(); display name for confirm prompt
+        falls back alias→label→field_name.
+      * All rendered rows re-render on storage change (live update when
+        panel-side library changes too).
+* [x] `src/options/index.html` — replaced the Field Library tab's empty
+      placeholder `<ul>` with hint + `<div><table><thead>7 cols</thead>
+      <tbody id="fields-tbody"></tbody></table></div>`.
+* [x] `src/options/options.css` — added table styles (sticky header,
+      zebra-less, hover row highlight), mono/strong/meta/dim utility
+      classes, `.options-cell-value` ellipsis, `.options-input`
+      (focus ring with brand box-shadow), `.options-type-tag` palette
+      (same per-type colors as the panel + dark theme variants), and
+      `.options-danger-button` Delete button with hover→red fill.
+* [x] `npm run typecheck` exits 0.
+* [x] Pushed to origin/main (commit `fb67a8c`).
+
+### Phase 2.5 user test checklist
+
+* [ ] Open side panel → Field Library → add 2+ real entries (e.g.
+      caller_id + assigned_to + short_description)
+* [ ] Observe group card header shows the label/display-name NOT the
+      raw field_name as main title; raw field_name appears as the
+      muted pill subtitle
+* [ ] Click ⚙ → options opens on Field Library tab → see a real 7-col
+      table, each row has an Alias text input, a Type tag, Label,
+      Field name, Value, date, Delete
+* [ ] Type an alias into caller_id row (e.g. "Customer"), blur input
+      → save happens silently
+* [ ] Go back to side panel (do NOT reload extension; storage changes
+      push live) → the `caller_id` group card now shows "Customer" as
+      its primary title; hover on the title → tooltip shows
+      `alias: Customer \n label: Caller \n field: caller_id`
+* [ ] In options, delete the `short_description` row → confirm →
+      table row disappears; side panel also reflects the deletion
+* [ ] Side panel entries still have per-entry Delete buttons + work
+      exactly as before
+
+---
+
+## Hotfix recap (Phase 2 runtime issues)
+
+Two Phase 2 runtime bugs were fixed before Phase 2 could be considered
+user-verified:
+
+1. **Cannot load .ts** — tried `chrome.scripting.executeScript({ files:
+   ["src/content/index.ts"] })`. Chrome only accepts compiled `.js` file
+   paths in `files:`. Resolution: statically registered
+   `manifest.content_scripts` with `matches: ["<all_urls>"], js:
+   ["src/content/index.ts"]` — CRXJS resolves the .ts to a compiled .js
+   at build/dev time, so Chrome gets a real .js.
+2. **Cannot establish connection / Receiving end does not exist** —
+   appears immediately after an extension reload on tabs that haven't
+   been refreshed. Resolution: SW `sendToTabOrInject()` catches those
+   error strings, then calls `forceInjectContentScript(tabId)` which
+   reads `chrome.runtime.getManifest().content_scripts[0].js` (the
+   RESOLVED real asset paths, never raw .ts source paths) and calls
+   `chrome.scripting.executeScript({ files: [resolved.js] })`, then
+   retries the original message.
+
+Both fixes are in the codebase and pushed.
+
+---
 
 ## Done in Phase 2
 
@@ -48,241 +121,100 @@ also changed the panel ↔ content communication channel from
   isolated world.
 * [x] `src/shared/storage.ts` — re-exports `StorageShape`; `uuid` now
   re-exported from storage-helpers.
-* [x] `src/content/index.ts` — **real** content script now. Implements:
-  1. `chrome.runtime.onMessage` listener handling PANEL_START_PICKER
-     / PANEL_CANCEL_PICKER.
-  2. `startPicker()` — creates hover highlight, masked overlay +
-     floating picker badge, window capture-phase mouseover/click/keydown
-     handlers, Esc to cancel.
-  3. `findFieldRoot()` — walks the clicked element up 8 levels looking
-     for an `<input[name]>/<select[name]>/<textarea[name]>` (works for
-     Classic `.do` forms; workspace uses `data-name` or closest
-     `[name]` descendant).
-  4. `captureFromElement()` — derives label via `label[for=<id>]` or
-     `.control-label` fallback, classifies type via DOM markers, reads
-     reference `_display` siblings for display_value + `#<id>` sys_id
-     input.
-  5. `tryGformProbe(fieldName)` — MAIN-world shim via
-     `chrome.scripting.executeScript({ world: 'MAIN' })` that consults
-     `window.g_form` to get authoritative type, value, display_value,
-     and `g_form.getUniqueValue()` as `table_sys_id`. Uses
-     `g_form.getField(fn).type` typeMap mapping when available.
-  6. `postToPanel()` — sends `CONTENT_FIELD_CAPTURED` /
-     `CONTENT_PICKER_CANCELLED` via `chrome.runtime.sendMessage`.
-* [x] `src/background/index.ts` — rewrote `onMessage` to route PANEL_*
-  messages to the active tab: resolves active tab id,
-  `ensureContentScriptInjected(tabId)` does a `__PING__` tabs-send,
-  falls back to `chrome.scripting.executeScript({ files:
-  [src/content/index.ts] })` if no listener, then forwards the PANEL
-  message and returns the content script's synchronous reply. Deferred
-  `SW_INVOKE_SERVICE` stub retained for Phase 4.
-* [x] `src/panel/index.html` — added "Field Library" section with
-  section-head + Add Field primary button, field library root div.
-* [x] `src/panel/panel.ts` — rewrote for Phase 2:
-  1. `sendToContent()` wraps `runtime.sendMessage` and unwraps
-     `{ok, reply}` or throws error.
-  2. `onMessage` listener filters content messages by sender.tab.
-  3. `handleFieldCaptured()` dedupes by
-     `(field_name, field_type, ref_sys_id|display|value)`, merges onto
-     existing entries, persists through `mutateStorage`.
-  4. `renderFieldLibrary()` groups entries by field_name into cards,
-     sorts cards alphabetically, lists each entry with type tag,
-     primary value + sys_id abbrev (reference) or truncated value,
-     capture-time + table_sys_id context line, and per-entry Delete
-     button.
-  5. `setPickerBusy()` + `wirePickerButtons()` hook header (`+`) and
-     section-head primary buttons into PANEL_START_PICKER flow, with
-     pending state and toast on activation.
-  6. `onStorageChanged(renderFieldLibrary)` keeps the list live as
-     storage changes (options edits, delete clicks, captures).
-* [x] `src/panel/panel.css` — added `panel-section-head`,
-  `panel-primary-button`, `panel-field-lib`, `panel-field-group` card,
-  per-type colorized `panel-field-type-tag` badges, value
-  primary/meta rows, `panel-danger-button` delete.
-* [x] Deleted obsolete `src/content/host.ts` (was the iframe host from
-  Phase 1 first draft).
+* [x] `src/content/index.ts` — real content script:
+  1. `chrome.runtime.onMessage` PANEL_START_PICKER / PANEL_CANCEL_PICKER.
+  2. `startPicker()` — DevTools-style overlay rect + tooltip +
+     picker badge, `requestAnimationFrame` sync on scroll/mousemove.
+  3. `findFieldRoot()` — walks 8 levels for `<input[name]>/<select[name]>/<textarea[name]>`.
+  4. `captureFromElement()` — label via `label[for=<id>]` / `.control-label` fallback,
+     type classification, `_display` siblings, MAIN-world g_form probe.
+  5. `tryGformProbe(fieldName)` — `chrome.scripting.executeScript({ world: 'MAIN' })`
+     for authoritative type/value/display/record_sys_id via `g_form.get*`.
+  6. `postToPanel()` — CONTENT_FIELD_CAPTURED / CONTENT_PICKER_CANCELLED.
+* [x] `src/background/index.ts` — PANEL_* → active tab routing via
+      `tabs.sendMessage` with `sendToTabOrInject` fallback (connection
+      errors → force-inject via resolved manifest paths).
+* [x] `src/panel/index.html` — Field Library section with Add Field
+      section-head primary button + header `+` quick-add.
+* [x] `src/panel/panel.ts` — `sendToContent`, `handleFieldCaptured`
+      dedupe, `renderFieldLibrary` groups entries by field_name,
+      `setPickerBusy`/`wirePickerButtons`, `onStorageChanged` live
+      re-render.
+* [x] `src/panel/panel.css` — section-head / primary-button /
+      field-lib card / per-type colorized tags / danger button.
+* [x] Deleted obsolete `src/content/host.ts` (was iframe host).
 * [x] `npm run typecheck` exits 0.
 
-## Verification status (Phase 2)
+## Phase 2 verification (user done)
 
-* [x] `npm run typecheck` exits 0
-* [ ] **User action required** — reload extension at
-      `chrome://extensions` once (SW and content scripts changed
-      substantially; CRXJS HMR is usually enough but reload is safer)
-* [ ] **User action required** — open a ServiceNow Classic form
-      (`*.do`) that has visible `caller_id`, `assigned_to`,
-      `short_description`, `description` fields
-* [ ] **User action required** — click SN Helper icon → side panel
-      opens (should still work from Phase 1)
-* [ ] **User action required** — click **Add Field** (either header `+`
-      or section-head primary button)
-  * Expect: floating badge on the page reads
-    "SN Helper picker active — click a field, Esc to cancel"
-  * Expect: moving mouse over elements shows a blue highlight on the
-    element
-* [ ] **User action required** — click the `caller_id` lookup field
-      while it has a value assigned
-  * Expect: picker stops, panel shows success toast with
-    "Added caller_id / [Display Name] · sys_id a1b2c3…x9yz"
-  * Expect: Field Library section renders a card grouped under
-    `caller_id`, with **reference** blue type tag, display name as
-    primary, abbreviated sys_id, and capture context line
-* [ ] **User action required** — pick two different values for
-      `assigned_to` (one value, then change it, then re-add)
-  * Expect: single `assigned_to` group card, **2 entries** badge,
-    each entry has its own display value + sys_id
-* [ ] **User action required** — click a text field like
-      `short_description` (with some text)
-  * Expect: **string** purple type tag, truncated content as primary,
-    truncation tooltip on hover
-* [ ] **User action required** — click a Workspace (Next Experience)
-      form field instead of a Classic field
-  * Expect: either capture succeeds (if DOM exposes `name` attribute
-    or `data-name` on closest ancestor), or panel shows
-    "Picker cancelled: clicked element is not a recognized ServiceNow
-    field" toast. Workspace DOM is different; if it consistently fails
-    we add Workspace-specific selectors next session.
-* [ ] **User action required** — press **Esc** during picker mode
-  * Expect: picker stops, panel shows "Picker cancelled" toast
-* [ ] **User action required** — delete an entry from the library via
-      its Delete button
-  * Expect: confirm dialog → entry disappears, storage change reflects
-    immediately (no page reload needed)
-
-## Known limits / next session backlog
-
-1. **Workspace (Next Experience) support untested.** Classic `.do` is
-   the primary target in Phase 2; Workspace captures may fail because
-   the field wrappers use `data-name` and a different lookup-input DOM
-   pattern. If Workspace capture is important now, open a real
-   workspace record, capture the clicked element's outer HTML, and we
-   write targeted selectors.
-2. **`g_form.getUniqueValue()` returned value is stored under the
-   misleading key `table_sys_id`** — actually it's the record's sys_id
-   at capture time, not the table name. Renaming it to `record_sys_id`
-   in the struct will happen in Phase 3 with a one-time storage
-   migration to avoid breaking existing data.
-3. **Reference dedupe uses `ref_sys_id` first, falls back to
-   `ref_display_value`.** In Classic this is correct; workspace might
-   not populate `ref_sys_id` via DOM alone — in that case multiple
-   captures of the same reference but different sys_id resolution
-   paths can create duplicates. Defer until workspace is tested.
-4. **Click capture only, no form scan.** Per design we intentionally
-   never auto-scan all form fields.
-
-## Resume hints (next session)
-
-1. If the side panel opens but click Add Field does nothing and SW
-   console shows "content script inject failed" about "file not found"
-   — check `dist/src/content/` has `index.ts` emitted. The path used is
-   `files: ["src/content/index.ts"]`. If CRXJS emits under a different
-   asset name, use the `chrome.runtime.getURL()` resolved path.
-2. If capture always returns "not a recognized ServiceNow field" even
-   on Classic forms, the most likely cause is that `findFieldRoot`
-   walked past the input because the clicked element was a wrapper
-   inside a lookup bubble. The 8-level walk is generous but not
-   infinite; check the actual DOM and extend the walk or add an
-   explicit selector for `.input-group > input[name]`.
-3. If `tryGformProbe` returns null on a `.do` page that clearly has
-   g_form (you can call `g_form.get('number')` in F12), the MAIN-world
-   shim may be running before g_form initializes or in the wrong frame.
-   Check that `chrome.tabs.query({ active:true, currentWindow:true })`
-   resolves to the tab with the form; some ServiceNow pages put the
-   form in an iframe inside the tab — in that case pass
-   `allFrames:true` to `executeScript` target.
-4. The dedupe logic in `handleFieldCaptured` treats identical values
-   as duplicates. If you intentionally want to save **two** different
-   empty presets for the same text field (e.g. blank vs. placeholder),
-   extend the storage key with a user-defined name or add a
-   "duplicate intentionally" path in the UI.
+* [x] Chrome loads extension without "Cannot load .ts" manifest errors
+* [x] Click Add Field — does NOT produce "cannot establish connection"
+      on a freshly-reloaded page (force-inject fires if needed)
+* [x] Hovering over ServiceNow fields shows DevTools-style blue
+      selection rect + alias/type tooltip
+* [x] Clicking caller_id / assigned_to / short_description /
+      description entries correctly populates the field library with
+      sys_ids for reference fields.
+* [x] Esc cancels picker, toast shows "Picker cancelled"
 
 ---
 
 ## Phase 1 (done)
 
-Summary: Chrome Side Panel API replaces iframe-injection host; browser
-native sidebar, no overlap. `openPanelOnActionClick: true` handles toggle.
-Content-script injection is now on-demand via SW routing ping+inject.
+Chrome Side Panel API replaces iframe injection. `openPanelOnActionClick: true`.
 
 ---
 
 ## Done in Phase 0
 
-* [x] `package.json` — Vite + `@crxjs/vite-plugin` + TypeScript
+* [x] `package.json` / `manifest.json` / `vite.config.ts` /
+      `tsconfig.json` / `.gitignore` / docs scaffold / TypeScript
+      shared modules (types, messages, storage) / panel shell +
+      options shell + content placeholder + background shell.
+* [x] `npm install` runs clean; `npm run build` produces loadable
+      `dist/`.
 
-* [x] `manifest.json` — MV3, `activeTab`/`storage`/`scripting` + localhost hosts
+---
 
-* [x] `vite.config.ts` — CRXJS plugin, sourcemap, chrome110 target, panel as rollup input
+## Resume hints (next session / another machine)
 
-* [x] `tsconfig.json` — strict, `types: ['chrome', 'vite/client']`
-
-* [x] `.gitignore` — node_modules + dist
-
-* [x] Docs scaffold — `README.md`, `docs/PROGRESS.md`, `docs/ARCHITECTURE.md`, `docs/PLAN.md`
-
-* [x] Shared modules — `types.ts`, `messages.ts`, `storage.ts`
-
-* [x] `src/background/index.ts` — service worker skeleton (onInstalled + action.onClicked log)
-
-* [x] `src/content/index.ts` — placeholder, real inject logic in Phase 1
-
-* [x] `src/panel/index.html` + `panel.ts` + `panel.css` — panel shell (header, groups, services, tokens, toast)
-
-* [x] `src/options/index.html` + `options.ts` + `options.css` — options shell (4 tabs)
-
-* [x] `npm install` runs cleanly (49 packages, 0 errors)
-
-* [x] `npm run build` produces loadable `dist/` (12 modules, manifest valid)
-
-## Verification status
-
-* [x] `npm install` exits 0
-
-* [x] `npm run build` exits 0 and `dist/` contains:
-  `manifest.json`, `service-worker-loader.js`, `src/panel/index.html`
-  (references `/assets/panel-*.js` + `/assets/panel-*.css`),
-  `src/options/index.html`, `assets/*`
-
-* [x] Side panel loads on click, page narrows to make room.
-
-## Resume hints (legacy)
-
-1. Phase 0 is build-verified.
-2. The chrome `action` has no `default_icon` yet — Chrome shows the default
-   puzzle piece. Defer icon set until Phase 1 polish.
-3. Phase 1 is the first user-visible milestone. Do not skip to Phase 2.
-4. `host_permissions` for ServiceNow domains is intentionally omitted — we
-   inject via `activeTab` + `chrome.scripting` (no permanent host grant).
-5. After Phase 1, the panel iframe must remain visible across SPA navigation
-   in ServiceNow workspace. Verify with both Classic UI (`*.do`) and workspace.
-6. The build leaves `dist/src/panel/panel.ts` and `dist/src/panel/panel.css`
-   as raw source copies (unused by the built HTML). Cosmetic; can be cleaned
-   by narrowing `web_accessible_resources.resources` later if desired.
+1. Clone: `git clone https://github.com/programfault/snow_helper.git`
+2. `cd snow_helper ; npm install ; npm run build` (test) or `npm run dev`
+   (dev with HMR).
+3. Chrome `chrome://extensions` → Developer mode → Load unpacked →
+   choose `snow_helper/dist`.
+4. If you see "Receiving end does not exist" or "Cannot establish
+   connection" right after a reload without navigating: the SW
+   force-inject fallback is supposed to handle this. If the fallback
+   fails, the error will contain the manifest-resolved file list; if
+   it says "manifest has no content_scripts[0].js", the manifest build
+   step was skipped (rerun `npm run dev` or `npm run build`).
+5. CRXJS HMR can break the statically-registered content script
+   mid-session. A page refresh or extension reload + page refresh
+   always recovers. The force-inject fallback covers the extension
+   reload case; page refresh covers the HMR case.
 
 ## Build artifacts summary
 
 ```
 dist/
-├── manifest.json                  # MV3, references SW loader + panel + options
-├── service-worker-loader.js       # CRXJS wrapper for src/background/index.ts
+├── manifest.json                  # MV3, content_scripts: src/content/index.ts (resolved)
+├── service-worker-loader.js       # CRXJS wrapper for background
 ├── src/
-│   ├── panel/index.html           # references /assets/panel-*.js + .css
-│   └── options/index.html         # references /assets/options-*.js + .css
-└── assets/
-    ├── panel-*.js / panel-*.css    # bundled panel TS+CSS
-    ├── index.html-*.js / index-*.css  # bundled options TS+CSS
-    └── modulepreload-polyfill-*.js
+│   ├── panel/index.html           # /assets/panel-*.js + .css
+│   └── options/index.html         # /assets/options-*.js + .css
+└── assets/  (bundled hashed JS/CSS)
 ```
 
-## Open questions / decisions
+## Known backlog
 
-* [ ] Whether to add a placeholder extension icon set in Phase 0 polish or
-  defer to Phase 1.
-
-* [ ] Whether `chrome.commands` global shortcuts ("toggle panel",
-  "fill last-used group") land in Phase 1 or a later polish phase.
-
-* [ ] Audit log shape — left intentionally minimal; expand when Phase 4 lands.
-
-* [x] Content script asset path: confirmed via Phase 2 SW routing as
-  `src/content/index.ts` in `chrome.scripting.executeScript({files:[]})`.
+1. Workspace (Next Experience) support untested — Classic `.do` is the
+   target. Open workspace and inspect a field's outer HTML if capture
+   fails, then we add workspace selectors.
+2. `table_sys_id` key is misleading; rename to `record_sys_id` with
+   one-time storage migration in Phase 3 (safest time, since no real
+   stored data yet or storage can be reset).
+3. Reference dedupe uses `ref_sys_id` first then `ref_display_value`.
+   On workspace DOM (no sys_id via DOM-only), this could create
+   duplicates.
+4. Click capture only. Per spec we never auto-scan forms.

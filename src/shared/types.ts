@@ -17,8 +17,16 @@ export interface FieldEntry {
   id: string;
   /** ServiceNow field name, e.g. `caller_id`. May repeat across entries. */
   field_name: string;
-  /** Visible label, e.g. `Caller`. */
+  /** Visible label from the form, e.g. `Caller`. Always retained for reference. */
   label: string;
+  /**
+   * Optional user-defined alias. When set, used as the PRIMARY display
+   * name across the panel UI, group editors, and fill toasts. When null
+   * / empty the UI falls back to `label` (and then `field_name` if the
+   * label is missing too).
+   * Editable exclusively on the options page's Field Library tab.
+   */
+  alias?: string;
   field_type: FieldType;
   /** Referenced record sys_id (reference fields only). */
   ref_sys_id?: string;
@@ -26,7 +34,11 @@ export interface FieldEntry {
   ref_display_value?: string;
   /** Simple-typed value (string/integer/boolean/journal/datetime/decimal). */
   value?: string;
-  /** Form record sys_id at capture time (reference only). */
+  /**
+   * Record sys_id at capture time. (Original key `table_sys_id` is kept
+   * for backwards compatibility with data captured prior to the rename;
+   * the field represents the record this field was captured from.)
+   */
   table_sys_id?: string;
   /** Epoch ms when captured. */
   captured_at: number;

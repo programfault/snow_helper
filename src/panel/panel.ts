@@ -180,8 +180,39 @@ async function deleteEntry(entryId: string): Promise<void> {
 }
 
 // ==========================================================================
-// Rendering
+// Rendering helpers (shared with options page later)
 // ==========================================================================
+
+/**
+ * Display name for a field entry, respecting user alias. Priority:
+ *   1. `entry.alias` (user-editable custom name, e.g. "Customer")
+ *   2. `entry.label` (ServiceNow form label, e.g. "Caller")
+ *   3. `entry.field_name` (raw field sys_name, e.g. "caller_id")
+ */
+export function displayFieldName(entry: {
+  alias?: string;
+  label?: string;
+  field_name: string;
+}): string {
+  return (entry.alias && entry.alias.trim()) ||
+    (entry.label && entry.label.trim()) ||
+    entry.field_name;
+}
+
+/** Tooltip text showing the full name trio (alias/label/field_name). */
+export function fieldNameTitle(entry: {
+  alias?: string;
+  label?: string;
+  field_name: string;
+}): string {
+  const parts: string[] = [];
+  if (entry.alias && entry.alias.trim()) parts.push(`alias: ${entry.alias.trim()}`);
+  if (entry.label && entry.label.trim() && entry.label.trim() !== entry.alias?.trim()) {
+    parts.push(`label: ${entry.label.trim()}`);
+  }
+  parts.push(`field: ${entry.field_name}`);
+  return parts.join('\n');
+}
 
 function truncate(s: string, n: number): string {
   if (s.length <= n) return s;
@@ -215,7 +246,14 @@ function renderFieldLibrary(shape: StorageShape): void {
 
   root.replaceChildren(
     ...groups.map(([name, list]: [string, FieldEntry[]]) => {
-      const label = list[0]?.label || name;
+      // Prefer alias/label of the most-recent entry in the group as the
+      // group-level display label; fall back to the raw field_name if no
+      // alias and no label are set on any entry.
+      const latest = [...list].sort((a, b) => b.captured_at - a.captured_at)[0];
+      const displayLabel = latest ? displayFieldName(latest) : name;
+      const labelText =
+        latest && latest.label && latest.label.trim() !== name ? latest.label : '';
+
       const card = document.createElement('div');
       card.className = 'panel-field-group';
 
@@ -223,11 +261,19 @@ function renderFieldLibrary(shape: StorageShape): void {
       head.className = 'panel-field-group-head';
       const nameSpan = document.createElement('span');
       nameSpan.className = 'panel-field-group-name';
-      nameSpan.textContent = name;
+      nameSpan.textContent = displayLabel;
+      nameSpan.title = latest ? fieldNameTitle(latest) : name;
       const labelSpan = document.createElement('span');
       labelSpan.className = 'panel-field-group-label';
-      labelSpan.title = label;
-      labelSpan.textContent = label !== name ? label : '';
+      labelSpan.title = labelText || name;
+      // If the display name is already the label, don't repeat it; show
+      // the raw field_name instead so the user knows which ServiceNow
+      // sys_name this group belongs to.
+      if (displayLabel === name) {
+        labelSpan.textContent = '';
+      } else {
+        labelSpan.textContent = labelText || name;
+      }
       const meta = document.createElement('div');
       meta.className = 'panel-field-group-meta';
       const badge = document.createElement('span');

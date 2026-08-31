@@ -35,11 +35,30 @@
           <p class="options-hint">
             Use the element picker from the right-side panel to add fields.
             Same field name may appear multiple times with different sys_ids.
+            The <strong>Alias</strong> column is editable — it becomes the
+            display name used in the side panel. Original ServiceNow
+            <code>field_name</code> and <code>label</code> are always visible
+            here for reference.
           </p>
           <div id="fields-empty" class="options-empty">
             No fields captured yet.
           </div>
-          <ul id="fields-list" class="options-list" hidden></ul>
+          <div class="options-table-wrap" id="fields-wrap">
+            <table class="options-table">
+              <thead>
+                <tr>
+                  <th style="min-width:190px">Alias <span class="options-th-sub">(edit)</span></th>
+                  <th style="width:100px">Type</th>
+                  <th>Label (SN form)</th>
+                  <th>Field name (ServiceNow)</th>
+                  <th style="min-width:220px">Preset value</th>
+                  <th style="width:180px">Captured</th>
+                  <th style="width:80px"></th>
+                </tr>
+              </thead>
+              <tbody id="fields-tbody"></tbody>
+            </table>
+          </div>
         </section>
 
         <section id="tab-groups" class="options-panel" hidden>
