@@ -341,7 +341,9 @@ async function captureFromElement(el: Element): Promise<FieldEntry | null> {
   const root = findFieldRoot(el);
   if (!root) return null;
   const tag = root.tagName.toLowerCase();
-  const rawFieldName = root.getAttribute('name');
+  // ServiceNow textareas (journal/description) sometimes use id instead of
+  // name. Fall back to id / data-name so we can still capture them.
+  const rawFieldName = root.getAttribute('name') || root.id || root.getAttribute('data-name');
   if (!rawFieldName) return null;
 
   // Resolve ServiceNow reference field name conventions:
@@ -831,8 +833,9 @@ function setSimpleByDom(
     document.querySelector<HTMLInputElement>(`input[name="${fieldName}"]`) ??
     (document.querySelector<HTMLTextAreaElement>(`textarea[name="${fieldName}"]`)) ??
     (document.querySelector<HTMLSelectElement>(`select[name="${fieldName}"]`)) ??
-    // Fallback: try the sys_display. prefixed visible input (ServiceNow
-    // reference fields expose a visible display input with this prefix).
+    // Fallback: try id selector (ServiceNow textareas often use id not name)
+    document.querySelector(`#${CSS.escape(fieldName)}`) as HTMLElement | null ??
+    // Fallback: try sys_display. prefixed visible input
     document.querySelector<HTMLInputElement>(`input[name="sys_display.${fieldName}"]`);
   if (!input) return { ok: false, error: `no DOM element with name="${fieldName}"` };
   try {
