@@ -62,13 +62,55 @@
         </section>
 
         <section id="tab-groups" class="options-panel" hidden>
+          <div class="options-actions">
+            <button id="btn-new-group" class="options-primary-button" type="button">+ New Group</button>
+          </div>
           <p class="options-hint">
-            Group library entries and assign per-item override values
-            (only non-reference fields are editable; reference items reuse
-            the library entry&rsquo;s sys_id + display_value).
+            Pick entries from the field library and (for non-reference
+            fields) optionally override the preset text value. Clicking a
+            group in the side panel fills all its items into the open
+            ServiceNow form.
           </p>
-          <div id="groups-empty" class="options-empty">No groups defined yet.</div>
-          <ul id="groups-list" class="options-list" hidden></ul>
+          <div id="groups-empty" class="options-empty">
+            No groups defined yet. Click <strong>+ New Group</strong> to create one.
+          </div>
+          <div id="groups-grid" class="groups-grid"></div>
+
+          <!-- Group create/edit dialog (opened from header "+ New Group" or
+               each group card's Edit button). -->
+          <dialog id="group-dialog" class="options-dialog">
+            <form id="group-form" method="dialog" autocomplete="off" class="options-dialog-form">
+              <header class="options-dialog-head">
+                <h3 id="group-dialog-title">New Group</h3>
+                <button class="options-icon-button" value="cancel" type="submit" formnovalidate aria-label="Close dialog">✕</button>
+              </header>
+              <div class="options-dialog-body">
+                <label class="options-field">
+                  <span class="options-label">Group name</span>
+                  <input id="group-name" class="options-input" type="text" required placeholder="e.g. Close ticket as duplicate" />
+                </label>
+
+                <div class="options-field">
+                  <div class="options-label-row">
+                    <span class="options-label">Fields in this group</span>
+                    <span class="options-help">Add entries from the field library. Override values only affect non-reference fields (reference items always use the entry's sys_id + display).</span>
+                  </div>
+
+                  <!-- Entry adder: filter by alias/label/field_name, pick one to append -->
+                  <div class="group-entry-adder">
+                    <input id="entry-search" type="text" class="options-input" placeholder="Search entries by alias / label / field name…" />
+                    <div id="entry-search-results" class="entry-search-results" hidden></div>
+                  </div>
+
+                  <ol id="group-items" class="group-items-list" aria-label="Group items"></ol>
+                </div>
+              </div>
+              <footer class="options-dialog-foot">
+                <button class="options-ghost-button" value="cancel" type="submit" formnovalidate>Cancel</button>
+                <button id="group-save" class="options-primary-button" type="submit" value="save">Save group</button>
+              </footer>
+            </form>
+          </dialog>
         </section>
 
         <section id="tab-services" class="options-panel" hidden>

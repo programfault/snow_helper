@@ -6,215 +6,163 @@
 
 ## Current phase
 
-**Phase 3 — Business groups + form fill** — status: **ready to start.**
+**Phase 4 — Remote services (SW fetch + options CRUD + panel invocation UI + result toast)** — status: **ready to start.**
 
 ## Phase status
 
-| Phase                              | Status      | Notes                                                                   |
-| ---------------------------------- | ----------- | ----------------------------------------------------------------------- |
-| 0 — Project skeleton               | done        | build verified, dev server runs, loadable                               |
-| 1 — Side panel                     | done        | Chrome Side Panel API (browser-native, no overlap)                      |
-| 2 — Element picker + field library | done        | DevTools-style overlay rect, MAIN-world g_form probe, dedupe, static content_scripts + force-inject fallback, user-verified |
-| 2.5 — Field aliases                | done        | `FieldEntry.alias` added; panel uses alias-or-label-or-field_name display with hover title; options Field Library tab has per-row alias editor + delete + raw columns |
-| 3 — Business groups + fill         | ready       | group CRUD in options, panel fill via g_form.setValue 3-arg             |
-| 4 — Remote services                | pending     | options CRUD, SW fetch with token header injection                      |
-| 5 — Token capture                  | pending     | dynamic (domain, localStorage key) config, content→storage→SW           |
+| Phase                              | Status  | Notes                                                                                                                                                                                                                                                                        |
+| ---------------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0 — Project skeleton               | done    | build verified, dev server runs, loadable                                                                                                                                                                                                                                    |
+| 1 — Side panel                     | done    | Chrome Side Panel API (browser-native, no overlap)                                                                                                                                                                                                                           |
+| 2 — Element picker + field library | done    | DevTools-style overlay rect, MAIN-world g\_form probe, dedupe, static content\_scripts + force-inject fallback, user-verified                                                                                                                                                |
+| 2.5 — Field aliases                | done    | `FieldEntry.alias` added; panel uses alias-or-label-or-field\_name display with hover title; options Field Library tab has per-row alias editor + delete + raw columns                                                                                                       |
+| 3 — Business groups + fill         | done    | options Group CRUD with dialog, alias-fuzzy entry searcher, fill engine with g\_form.setValue (3-arg refs) + DOM fallback, template vars {{today}}/{{now}}/{{current\_user}}/{{sys\_id}}/{{host}}, panel group list with Fill + Manage Groups shortcut, per-item error toast |
+| 4 — Remote services                | ready   | options CRUD, SW fetch with token header injection, message routing                                                                                                                                                                                                          |
+| 5 — Token capture                  | pending | dynamic (domain, localStorage key) config, content→storage→SW                                                                                                                                                                                                                |
 
----
+***
 
-## Done in Phase 2.5 (Aliases)
+## Done in Phase 3 (business groups + form fill)
 
-* [x] `src/shared/types.ts` — added optional `FieldEntry.alias?: string`
-      with semantic comment (display priority chain: alias → label →
-      field_name; editable only in options Field Library tab). Kept
-      `table_sys_id` name for backwards compatibility with existing data.
-* [x] `src/panel/panel.ts` — added two pure helpers (`displayFieldName`,
-      `fieldNameTitle`) that encapsulate the alias/label/field_name
-      priority + tooltip. Applied them to the Field Library group card
-      header (bold primary display uses alias; pill uses alias if set;
-      row-level entry tooltips show all three names on hover).
-* [x] `src/options/options.ts` — rewrote options page:
-      * `wireTabs()` now guarantees panel.hidden state matches CSS active
-        class (fixes previous bug where `is-active` only set the class
-        and relied on CSS without actually hiding/showing panels).
-      * Added `renderFieldLibrary()` that renders a full HTML table
-        (columns: **Alias** (editable input), **Type** (colorized tag),
-        **Label**, **Field name** (mono bold), **Preset value** (disp +
-        sys_id for refs, truncated with tooltip for strings, **dim
-        (empty)** for blanks), **Captured** date, **Delete** button).
-      * `alias` input commits on blur or Enter key; writes single-field
-        mutation via `mutateStorage`.
-      * Delete button uses confirm(); display name for confirm prompt
-        falls back alias→label→field_name.
-      * All rendered rows re-render on storage change (live update when
-        panel-side library changes too).
-* [x] `src/options/index.html` — replaced the Field Library tab's empty
-      placeholder `<ul>` with hint + `<div><table><thead>7 cols</thead>
-      <tbody id="fields-tbody"></tbody></table></div>`.
-* [x] `src/options/options.css` — added table styles (sticky header,
-      zebra-less, hover row highlight), mono/strong/meta/dim utility
-      classes, `.options-cell-value` ellipsis, `.options-input`
-      (focus ring with brand box-shadow), `.options-type-tag` palette
-      (same per-type colors as the panel + dark theme variants), and
-      `.options-danger-button` Delete button with hover→red fill.
-* [x] `npm run typecheck` exits 0.
-* [x] Pushed to origin/main (commit `fb67a8c`).
+### Options page Groups tab (`src/options/index.html`, `src/options/options.ts`, `src/options/options.css`)
 
-### Phase 2.5 user test checklist
+* [x] `<dialog id="group-dialog">` (native `<dialog method="dialog" + showModal />`), with header (title + close ✕), body (name input + entry-search adder + items list), footer (Cancel / Save).
 
-* [ ] Open side panel → Field Library → add 2+ real entries (e.g.
-      caller_id + assigned_to + short_description)
-* [ ] Observe group card header shows the label/display-name NOT the
-      raw field_name as main title; raw field_name appears as the
-      muted pill subtitle
-* [ ] Click ⚙ → options opens on Field Library tab → see a real 7-col
-      table, each row has an Alias text input, a Type tag, Label,
-      Field name, Value, date, Delete
-* [ ] Type an alias into caller_id row (e.g. "Customer"), blur input
-      → save happens silently
-* [ ] Go back to side panel (do NOT reload extension; storage changes
-      push live) → the `caller_id` group card now shows "Customer" as
-      its primary title; hover on the title → tooltip shows
-      `alias: Customer \n label: Caller \n field: caller_id`
-* [ ] In options, delete the `short_description` row → confirm →
-      table row disappears; side panel also reflects the deletion
-* [ ] Side panel entries still have per-entry Delete buttons + work
-      exactly as before
+* [x] **Groups grid** (`groups-grid`) — 1-col, ≥860px 2-col responsive cards.
+  * Each card: header (name · item-count · Edit/Delete), ordered list of items (field name alias-or-label, per-type color tag, value/override preview, orphan entry warning in red if the library entry was deleted).
 
----
+  * Delete field entry → all groups that referenced the entry auto-drop the item **and** the orphan warning fires on the next group render if the ref remains in the stored shape but the entry was concurrently removed elsewhere.
 
-## Hotfix recap (Phase 2 runtime issues)
+* [x] **Create / Save flow.** `dialogState` is a discriminated union of `{mode:'new'|'edit', name, items}`. Name is required via HTML5 validation + manual trim. Save writes `created_at:now / updated_at:now` into storage and closes dialog.
 
-Two Phase 2 runtime bugs were fixed before Phase 2 could be considered
-user-verified:
+* [x] **Fuzzy alias/label/field\_name/ref\_display entry searcher**: debounced 80ms search, rows are clickable buttons with colorized type tags and value previews. Rows already in the current group are dimmed with a striped background (tooltip: "already in this group — click again to add a duplicate"). Clicking a row appends a fresh `{entry_ref}` to `dialogState.items`, re-renders the items list, and refocuses/selects the search box for fast chaining.
 
-1. **Cannot load .ts** — tried `chrome.scripting.executeScript({ files:
-   ["src/content/index.ts"] })`. Chrome only accepts compiled `.js` file
-   paths in `files:`. Resolution: statically registered
-   `manifest.content_scripts` with `matches: ["<all_urls>"], js:
-   ["src/content/index.ts"]` — CRXJS resolves the .ts to a compiled .js
-   at build/dev time, so Chrome gets a real .js.
-2. **Cannot establish connection / Receiving end does not exist** —
-   appears immediately after an extension reload on tabs that haven't
-   been refreshed. Resolution: SW `sendToTabOrInject()` catches those
-   error strings, then calls `forceInjectContentScript(tabId)` which
-   reads `chrome.runtime.getManifest().content_scripts[0].js` (the
-   RESOLVED real asset paths, never raw .ts source paths) and calls
-   `chrome.scripting.executeScript({ files: [resolved.js] })`, then
-   retries the original message.
+* [x] **Per-item form controls**:
+  * Non-reference fields → `override_value` textarea (rows=2 default, journal gets rows=4). Placeholder shows the library preset. Help text advertises `{{today}} {{now}} {{sys_id}} {{current_user}}`.
 
-Both fixes are in the codebase and pushed.
+  * Reference fields → read-only line showing display + sys\_id with a reminder that reference values are always from the entry (never overrideable — matches the spec).
 
----
+  * Each row has ▲/▼ reorder buttons and Remove. Orphan rows render with a red warning box.
 
-## Done in Phase 2
+* [x] When a Field Library entry is deleted, group items referencing it are automatically stripped (`renderFieldRow → Delete handler` mutates `cur.groups` too) — prevents dangling refs.
 
-* [x] `src/shared/messages.ts` — rewrote for new channel;
-  `PanelToContentMessage` (PANEL_START_PICKER / PANEL_CANCEL_PICKER /
-  PANEL_FILL_GROUP / PANEL_INVOKE_SERVICE) and `ContentToPanelMessage`
-  (CONTENT_TOAST / CONTENT_FIELD_CAPTURED /
-  CONTENT_PICKER_CANCELLED / CONTENT_FILL_RESULT /
-  CONTENT_SERVICE_RESULT); re-exported `FieldEntry`, `FieldType`,
-  `FieldGroup` for convenient call-site imports.
-* [x] `src/shared/storage-helpers.ts` — `uuid()` (was in storage.ts)
-  and `abbrevSysId()` helpers that are safe for the content script's
-  isolated world.
-* [x] `src/shared/storage.ts` — re-exports `StorageShape`; `uuid` now
-  re-exported from storage-helpers.
-* [x] `src/content/index.ts` — real content script:
-  1. `chrome.runtime.onMessage` PANEL_START_PICKER / PANEL_CANCEL_PICKER.
-  2. `startPicker()` — DevTools-style overlay rect + tooltip +
-     picker badge, `requestAnimationFrame` sync on scroll/mousemove.
-  3. `findFieldRoot()` — walks 8 levels for `<input[name]>/<select[name]>/<textarea[name]>`.
-  4. `captureFromElement()` — label via `label[for=<id>]` / `.control-label` fallback,
-     type classification, `_display` siblings, MAIN-world g_form probe.
-  5. `tryGformProbe(fieldName)` — `chrome.scripting.executeScript({ world: 'MAIN' })`
-     for authoritative type/value/display/record_sys_id via `g_form.get*`.
-  6. `postToPanel()` — CONTENT_FIELD_CAPTURED / CONTENT_PICKER_CANCELLED.
-* [x] `src/background/index.ts` — PANEL_* → active tab routing via
-      `tabs.sendMessage` with `sendToTabOrInject` fallback (connection
-      errors → force-inject via resolved manifest paths).
-* [x] `src/panel/index.html` — Field Library section with Add Field
-      section-head primary button + header `+` quick-add.
-* [x] `src/panel/panel.ts` — `sendToContent`, `handleFieldCaptured`
-      dedupe, `renderFieldLibrary` groups entries by field_name,
-      `setPickerBusy`/`wirePickerButtons`, `onStorageChanged` live
-      re-render.
-* [x] `src/panel/panel.css` — section-head / primary-button /
-      field-lib card / per-type colorized tags / danger button.
-* [x] Deleted obsolete `src/content/host.ts` (was iframe host).
+### Content script fill engine (`src/content/index.ts`)
+
+* [x] `PANEL_FILL_GROUP` message now carries fully-expanded `group: FieldGroup` and `fields: Record<string, FieldEntry>` snapshot from the panel (content script can't directly read `chrome.storage.local` from isolated world without an extra round-trip; this avoids one SW detour per fill).
+
+* [x] `fillGroup`:
+  * Early-gate on non-ServiceNow URLs (`CONTENT_TOAST error`).
+
+  * Empty-group `CONTENT_TOAST warning`.
+
+  * Iterates items in stored order, builds a per-item `{display, ok, error?}` report.
+
+  * Orphan entries (entry\_ref missing from `fields` snapshot) show "Entry no longer exists…" without attempting to fill.
+
+* [x] `readTemplateGlobals` — MAIN-world `g_user.userName` + `g_form.getUniqueValue()` via `scripting.executeScript({world:'MAIN'})`, composes `today` (yyyy-MM-dd), `now` (yyyy-MM-dd HH:mm), `host`, all in user's browser local tz.
+
+* [x] `applyTemplateVars` — replaces `{{today}}`, `{{now}}`, `{{current_user}}`, `{{sys_id}}`, `{{host}}`.
+
+* [x] `fillOneItem` — dispatch:
+  * **reference** → requires `entry.ref_sys_id`; tries `g_form.setValue(name, sys_id, display_value)` first (3-arg form that sets both the hidden sys\_id and the visible display so the saved value is correct and no re-query is triggered); falls back to writing `<input name=field_name>` (sys\_id) + `<input name=sys_display.field_name>` or `#field_name_display` (display) with React-setter bypass via prototype value descriptor + `input` and `change` events dispatched.
+
+  * **simple types (string / integer / decimal / boolean / journal / datetime)** → uses `override_value ?? entry.value`, then runs `applyTemplateVars`; tries `g_form.setValue(name, value)` first; falls back to prototype-set + events on the matched `<input|textarea|select>[name=field_name]`.
+
+* [x] `CONTENT_FILL_RESULT` is the new rich-result message shape with counts and per-item `{field_name, display, ok, error?}`.
+
+### Panel side UI + routing (`src/panel/panel.ts`, `src/panel/index.html`, `src/panel/panel.css`)
+
+* [x] Groups section header now has `Field Groups` + **Manage Groups** button (ghost style). Button opens the options page; users click the Groups tab.
+
+* [x] `renderGroups` + `renderGroupCard` build a card-per-group. Each card:
+  * Head (group name · item count pill).
+
+  * Item list (alias display name, per-type color tag, right-side value preview with 32-char truncation + tooltip for full override value).
+
+  * Fill button (disabled when no items) — sends `PANEL_FILL_GROUP` with the expanded group + fields snapshot (captured at click time from current storage).
+
+* [x] `CONTENT_FILL_RESULT` handler:
+  * 0 errors → success toast: `Filled group "<name>" (N/N)`.
+
+  * ≥1 error → error toast: `Group "<name>" had X error(s)` + detail bullets listing every failed field with its display name, raw field name, and error text.
+
+* [x] Toast level `warning` added to union + CSS stripe (`panel-toast--warning` amber) for empty-group / DOM-gated failures.
+
+### Message contracts (`src/shared/messages.ts`)
+
+* [x] `export type { FieldGroup, FieldGroupItem }` added to re-exports; `FieldGroup` imported locally so the new message can reference it.
+
+* [x] `PANEL_FILL_GROUP` rewritten from `{group_id:string}` to `{group:FieldGroup, fields:Record<string, FieldEntry>}`.
+
+* [x] `CONTENT_FILL_RESULT` rewritten with `group_id`, `group_name`, `success`, `success_count`, `error_count`, and per-item `results[]`.
+
+* [x] `CONTENT_TOAST.level` union expanded to include `'warning'`.
+
+### Tests: type-check
+
 * [x] `npm run typecheck` exits 0.
 
-## Phase 2 verification (user done)
+### Push
 
-* [x] Chrome loads extension without "Cannot load .ts" manifest errors
-* [x] Click Add Field — does NOT produce "cannot establish connection"
-      on a freshly-reloaded page (force-inject fires if needed)
-* [x] Hovering over ServiceNow fields shows DevTools-style blue
-      selection rect + alias/type tooltip
-* [x] Clicking caller_id / assigned_to / short_description /
-      description entries correctly populates the field library with
-      sys_ids for reference fields.
-* [x] Esc cancels picker, toast shows "Picker cancelled"
+* [x] Committed and pushed to `origin/main` (commit `f3849c1`).
 
----
+***
 
-## Phase 1 (done)
+## Phase 3 user test checklist
 
-Chrome Side Panel API replaces iframe injection. `openPanelOnActionClick: true`.
+1. Open a ServiceNow `.do` form and capture \~4 entries: caller\_id **(reference)**, assigned\_to (reference, also grab 2 different users so the same field has 2 entries), short\_description (string), description (journal).
+2. Give the entries aliases on the Options Field Library tab: e.g. caller\_id → "Customer", assigned\_to first user → "Me", assigned\_to 2nd user → "Sam", short\_description → "Title", description → "Details".
+3. **Options → Groups tab → + New Group**. Name it "Escalate to Sam".
 
----
+   1. In the entry search, type `sam` → "Sam" reference result appears; click it to add.
+   2. Type `t` (or `title`) → the Title entry appears; add it.
+   3. In the Title row, open the override textarea and write `Escalation on {{today}}: {{sys_id}} assigned to Sam for triage by {{now}} (owner was {{current_user}})`.
+   4. Add "Details" (journal). Override textarea rows=4 will appear. Write a 2-line close-note template that uses `{{today}}` somewhere.
+   5. Click Save group.
+4. **Grid of groups** shows the new card. Click Edit on the card — confirm dialog re-opens with the name, items, and overrides exactly as you saved them. Add one more field (e.g. "Customer") then Save.
+5. **Side panel → Field Groups** section shows the card with 4 items (or 5) listed, alias names first, and "Me"/"Sam" display values for reference items. Click Fill.
+6. **Toast success**: Side panel shows green `Filled group "Escalate to Sam" (N/N)`. The ServiceNow form shows:
 
-## Done in Phase 0
+   * assigned\_to = Sam (correct user; display shows Sam not sys\_id).
 
-* [x] `package.json` / `manifest.json` / `vite.config.ts` /
-      `tsconfig.json` / `.gitignore` / docs scaffold / TypeScript
-      shared modules (types, messages, storage) / panel shell +
-      options shell + content placeholder + background shell.
-* [x] `npm install` runs clean; `npm run build` produces loadable
-      `dist/`.
+   * short\_description = The template-filled string. Today date matches your locale, sys\_id matches the URL `sys_id=`, now matches the current time, and `{{current_user}}` becomes your SN login name.
 
----
+   * description = The close-note template with filled today date.
 
-## Resume hints (next session / another machine)
+   * Save the ServiceNow ticket (click Update) and confirm: **all 3 fields persist correctly, especially assigned\_to didn't lose its value.**
+7. **DOM fallback sanity check**: Temporarily try to fill a simple group from a blank `about:blank` page (not ServiceNow). Expect red error toast from `fillGroup`:
+   `Fill only works on a ServiceNow page.` — confirms the URL gate works.
+8. **Delete orphan entry test**: In Field Library, delete "Sam". Go back to groups grid → the group card now renders a red "(removed: …)" line next to the formerly-Sam item (auto-drop already stripped the ref during the delete mutation; this tests that the UI handles the edge case cleanly).
+9. **Delete group**: In groups grid → Delete the new group → confirm → card disappears.
 
-1. Clone: `git clone https://github.com/programfault/snow_helper.git`
-2. `cd snow_helper ; npm install ; npm run build` (test) or `npm run dev`
-   (dev with HMR).
-3. Chrome `chrome://extensions` → Developer mode → Load unpacked →
-   choose `snow_helper/dist`.
-4. If you see "Receiving end does not exist" or "Cannot establish
-   connection" right after a reload without navigating: the SW
-   force-inject fallback is supposed to handle this. If the fallback
-   fails, the error will contain the manifest-resolved file list; if
-   it says "manifest has no content_scripts[0].js", the manifest build
-   step was skipped (rerun `npm run dev` or `npm run build`).
-5. CRXJS HMR can break the statically-registered content script
-   mid-session. A page refresh or extension reload + page refresh
-   always recovers. The force-inject fallback covers the extension
-   reload case; page refresh covers the HMR case.
+***
 
-## Build artifacts summary
+## Resume hints (Phase 4 kickoff)
+
+Goal: allow users to define named HTTP services (name + method + endpoint + body template with `{{…}}` vars + optional token config ref), invoke them by clicking in the panel, route the invocation through the SW so we can:
+
+1. Inject Authorization headers from captured tokens via domain match.
+2. Avoid any page Content Security Policy blocking XHR.
+3. Send the result back as a formatted toast (success with JSON preview body, error with status + text).
+
+Options Services tab needs: create/edit/delete dialog similar to groups, method dropdown, endpoint text, raw JSON-or-string body template textarea, token ref `<select>` (maps to Phase 5's `tokens` map — for now the select can be empty + a Phase 5 todo note).
+
+Background SW needs a new branch on `chrome.runtime.onMessage`:
 
 ```
-dist/
-├── manifest.json                  # MV3, content_scripts: src/content/index.ts (resolved)
-├── service-worker-loader.js       # CRXJS wrapper for background
-├── src/
-│   ├── panel/index.html           # /assets/panel-*.js + .css
-│   └── options/index.html         # /assets/options-*.js + .css
-└── assets/  (bundled hashed JS/CSS)
+SW_INVOKE_SERVICE(service: RemoteService, context: { sys_id, current_user, field_values })
+  → resolve tokens to inject via token configs matching request origin
+  → fetch(endpoint, { method, headers: {...}, body: template(body_template, context) })
+  → return { ok, status, body_json_or_text, error? } via sendResponse
 ```
 
-## Known backlog
+Content script can stay thin for Phase 4; the panel can send PANEL\_INVOKE\_SERVICE with a pre-resolved context snapshot read via a new MAIN-world probe function (`g_form.getUniqueValue()`, `g_user.userName`, plus any currently selected item field values from the panel). The panel is already reading storage and can send the full service record + context snapshot to the SW without going through the content script.
 
-1. Workspace (Next Experience) support untested — Classic `.do` is the
-   target. Open workspace and inspect a field's outer HTML if capture
-   fails, then we add workspace selectors.
-2. `table_sys_id` key is misleading; rename to `record_sys_id` with
-   one-time storage migration in Phase 3 (safest time, since no real
-   stored data yet or storage can be reset).
-3. Reference dedupe uses `ref_sys_id` first then `ref_display_value`.
-   On workspace DOM (no sys_id via DOM-only), this could create
-   duplicates.
+### Known backlog
+
+1. Workspace (Next Experience) support untested — Classic `.do` is the target.
+2. `table_sys_id` key is misleading; rename to `record_sys_id` with one-time storage migration.
+3. Reference dedupe uses `ref_sys_id` first then `ref_display_value`. On workspace DOM (no sys\_id via DOM-only), this could create duplicates.
 4. Click capture only. Per spec we never auto-scan forms.
+5. Panel "Manage Groups" opens options but does not automatically switch to the Groups tab (add URL params + options page initial tab resolver for a nice polish item — can do in Phase 4).
+

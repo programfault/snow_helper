@@ -37,9 +37,12 @@
         </section>
 
         <section class="panel-section">
-          <h2 class="panel-section-title">Field Groups</h2>
-          <p id="groups-empty" class="panel-empty">No groups yet. Define them in Settings.</p>
-          <ul id="groups-list" class="panel-list" aria-label="Field groups"></ul>
+          <div class="panel-section-head">
+            <h2 class="panel-section-title">Field Groups</h2>
+            <button id="btn-groups-settings" class="panel-ghost-button" type="button">Manage Groups</button>
+          </div>
+          <p id="groups-empty" class="panel-empty">No groups yet. Click <strong>Manage Groups</strong> to create one.</p>
+          <div id="groups-root" class="panel-groups" aria-label="Field groups"></div>
         </section>
 
         <section class="panel-section">

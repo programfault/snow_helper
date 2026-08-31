@@ -9,7 +9,7 @@
 //     the panel filters messages by sender.tab.id to isolate the active
 //     tab)
 
-import type { ContentToPanelMessage, FieldEntry, PanelToContentMessage } from '../shared/messages';
+import type { ContentToPanelMessage, FieldEntry, FieldGroup, PanelToContentMessage } from '../shared/messages';
 import { abbrevSysId } from '../shared/messages';
 import {
   mutateStorage,
@@ -23,7 +23,7 @@ import {
 // ==========================================================================
 let toastTimer: number | null = null;
 function showToast(
-  level: 'info' | 'success' | 'error',
+  level: 'info' | 'success' | 'error' | 'warning',
   text: string,
   detail?: string,
 ): void {
@@ -99,9 +99,21 @@ async function handleContentMessage(
         showToast('info', 'Picker cancelled', msg.reason);
       }
       break;
-    case 'CONTENT_FILL_RESULT':
-      // Phase 3
+    case 'CONTENT_FILL_RESULT': {
+      const successes = msg.success_count;
+      const errors = msg.error_count;
+      const level = errors === 0 ? 'success' : msg.success_count === 0 ? 'error' : 'error';
+      const title =
+        errors === 0
+          ? `Filled group "${msg.group_name}" (${successes}/${successes})`
+          : `Group "${msg.group_name}" had ${errors} error${errors === 1 ? '' : 's'}`;
+      const detail = msg.results
+        .filter((r) => !r.ok)
+        .map((r) => `- ${r.display} (${r.field_name}): ${r.error ?? 'failed'}`)
+        .join('\n');
+      showToast(level as 'success' | 'error' | 'info', title, detail || undefined);
       break;
+    }
     case 'CONTENT_SERVICE_RESULT':
       // Phase 4
       break;
@@ -418,15 +430,138 @@ function wireSettingsButton(): void {
 }
 
 // ==========================================================================
+// Groups: rendering and Fill buttons
+// ==========================================================================
+
+function renderGroups(shape: StorageShape): void {
+  const root = document.getElementById('groups-root');
+  const empty = document.getElementById('groups-empty') as HTMLElement | null;
+  if (!root) return;
+  const groups = Object.values(shape.groups).sort(
+    (a, b) => b.updated_at - a.updated_at,
+  );
+  if (empty) empty.hidden = groups.length !== 0;
+  root.replaceChildren(
+    ...groups.map((g) => renderGroupCard(g, shape)),
+  );
+}
+
+function renderGroupCard(group: FieldGroup, shape: StorageShape): HTMLElement {
+  const card = document.createElement('article');
+  card.className = 'panel-group-card';
+
+  const head = document.createElement('div');
+  head.className = 'panel-group-card-head';
+  const title = document.createElement('h3');
+  title.className = 'panel-group-card-title';
+  title.textContent = group.name;
+  const pill = document.createElement('span');
+  pill.className = 'panel-meta';
+  pill.textContent = `${group.items.length} item${group.items.length === 1 ? '' : 's'}`;
+  head.append(title, pill);
+
+  const items = document.createElement('ul');
+  items.className = 'panel-group-items';
+  if (group.items.length === 0) {
+    const li = document.createElement('li');
+    li.className = 'panel-meta';
+    li.textContent = '(empty — Manage Groups to add fields)';
+    items.appendChild(li);
+  } else {
+    for (const it of group.items) {
+      const entry = shape.fields[it.entry_ref];
+      const li = document.createElement('li');
+      li.className = 'panel-group-item';
+      const name = document.createElement('span');
+      name.className = 'panel-group-item-name';
+      if (!entry) {
+        name.textContent = `(removed: ${it.entry_ref.slice(0, 8)})`;
+        name.classList.add('panel-error');
+      } else {
+        name.textContent = displayFieldName(entry);
+        const tag = document.createElement('span');
+        tag.className = `panel-type-tag panel-type-tag--${entry.field_type}`;
+        tag.textContent = entry.field_type;
+        li.appendChild(tag);
+      }
+      const val = document.createElement('span');
+      val.className = 'panel-group-item-value';
+      if (entry && entry.field_type === 'reference') {
+        val.textContent = entry.ref_display_value ?? '(no display)';
+        val.classList.add('panel-meta');
+      } else if (entry) {
+        const v = it.override_value ?? entry.value ?? '';
+        val.textContent = v.length > 32 ? v.slice(0, 32) + '…' : v || '(blank)';
+        val.title = v;
+      }
+      li.append(name, val);
+      items.appendChild(li);
+    }
+  }
+
+  const actions = document.createElement('div');
+  actions.className = 'panel-group-card-actions';
+  const fillBtn = document.createElement('button');
+  fillBtn.type = 'button';
+  fillBtn.className = 'panel-primary-button';
+  fillBtn.textContent = group.items.length === 0 ? 'No items to fill' : 'Fill';
+  fillBtn.disabled = group.items.length === 0;
+  fillBtn.addEventListener('click', () => void runFillGroup(group, shape));
+  actions.appendChild(fillBtn);
+
+  card.append(head, items, actions);
+  return card;
+}
+
+async function runFillGroup(group: FieldGroup, shape: StorageShape): Promise<void> {
+  if (group.items.length === 0) return;
+  try {
+    await sendToContent({
+      kind: 'PANEL_FILL_GROUP',
+      group,
+      fields: shape.fields,
+    });
+  } catch (err) {
+    showToast(
+      'error',
+      `Failed to start fill for "${group.name}"`,
+      String(err),
+    );
+  }
+}
+
+// ==========================================================================
 // Init
 // ==========================================================================
+
+function wireGroupsShortcuts(): void {
+  const btn = document.getElementById('btn-groups-settings');
+  btn?.addEventListener('click', () => {
+    if (chrome.runtime?.openOptionsPage) {
+      void (async () => {
+        await chrome.runtime.openOptionsPage();
+        // Open options then jump to groups tab — the options page reads
+        // `?tab=groups` or defaults to Field Library, so here we append
+        // a small storage hint the options page listens for if present.
+        // For simplicity in MVP we just open options; users can click
+        // the Groups tab.
+      })();
+    }
+  });
+}
+
+function renderAll(shape: StorageShape): void {
+  renderFieldLibrary(shape);
+  renderGroups(shape);
+}
 
 async function init(): Promise<void> {
   wireSettingsButton();
   wirePickerButtons();
+  wireGroupsShortcuts();
   const initial = await readStorage();
-  renderFieldLibrary(initial);
-  onStorageChanged(renderFieldLibrary);
+  renderAll(initial);
+  onStorageChanged(renderAll);
 }
 
 void init();

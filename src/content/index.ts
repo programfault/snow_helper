@@ -13,7 +13,7 @@
 // handles both the isolated-world DOM work and proxies MAIN-world reads
 // by re-injecting a MAIN-world shim via chrome.scripting when needed.
 
-import type { ContentToPanelMessage, FieldEntry, FieldType, PanelToContentMessage } from '../shared/messages';
+import type { ContentToPanelMessage, FieldEntry, FieldGroup, FieldGroupItem, FieldType, PanelToContentMessage } from '../shared/messages';
 import { uuid } from '../shared/messages';
 
 let pickerActive = false;
@@ -44,7 +44,7 @@ function ensureInjected(): void {
           sendResponse({ ok: true });
           return false;
         case 'PANEL_FILL_GROUP':
-          // Phase 3
+          void fillGroup(message.group, message.fields);
           sendResponse({ ok: true });
           return false;
         case 'PANEL_INVOKE_SERVICE':
@@ -534,6 +534,296 @@ async function tryGformProbe(fieldName: string): Promise<
   } catch {
     return null;
   }
+}
+
+// ==========================================================================
+// Phase 3.2: Fill group (MAIN-world g_form.setValue + DOM fallback)
+// ==========================================================================
+
+/**
+ * Fill every item of a group into the current ServiceNow form.
+ * Priority: MAIN-world `g_form.setValue(...)` → DOM fallback.
+ *
+ * Reference items always use the FieldEntry's ref_sys_id + ref_display_value
+ * (3-arg setValue). Non-reference items use override_value first, then the
+ * entry's stored value, and both are run through the template engine before
+ * writing.
+ *
+ * Result is broadcast back as a CONTENT_FILL_RESULT message with counts +
+ * field-level errors so the panel can toast it.
+ */
+async function fillGroup(group: FieldGroup, fields: Record<string, FieldEntry>): Promise<void> {
+  if (!window.location.hostname.includes('service-now')) {
+    postToPanel({
+      kind: 'CONTENT_TOAST',
+      level: 'error',
+      text: 'Fill only works on a ServiceNow page.',
+    });
+    return;
+  }
+  if (group.items.length === 0) {
+    postToPanel({
+      kind: 'CONTENT_TOAST',
+      level: 'warning',
+      text: `Group "${group.name}" has no items.`,
+    });
+    return;
+  }
+
+  // Resolve template globals (MAIN-world snapshot). Falls back to DOM-derived
+  // values when g_form isn't available.
+  const globals = await readTemplateGlobals();
+
+  const results: Array<{
+    field_name: string;
+    display: string;
+    ok: boolean;
+    error?: string;
+  }> = [];
+
+  for (const item of group.items) {
+    const entry = fields[item.entry_ref];
+    if (!entry) {
+      results.push({
+        field_name: `?${item.entry_ref.slice(0, 8)}`,
+        display: 'Missing entry',
+        ok: false,
+        error: 'Entry no longer exists in the field library.',
+      });
+      continue;
+    }
+    try {
+      const filled = await fillOneItem(entry, item, globals);
+      results.push({
+        field_name: entry.field_name,
+        display: displayFieldName(entry),
+        ok: filled.ok,
+        error: filled.error,
+      });
+    } catch (err) {
+      results.push({
+        field_name: entry.field_name,
+        display: displayFieldName(entry),
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  const successCount = results.filter((r) => r.ok).length;
+  const failCount = results.length - successCount;
+  postToPanel({
+    kind: 'CONTENT_FILL_RESULT',
+    group_id: group.id,
+    group_name: group.name,
+    success: failCount === 0,
+    success_count: successCount,
+    error_count: failCount,
+    results,
+  });
+}
+
+function displayFieldName(entry: {
+  alias?: string;
+  label?: string;
+  field_name: string;
+}): string {
+  return (entry.alias && entry.alias.trim()) ||
+    (entry.label && entry.label.trim()) ||
+    entry.field_name;
+}
+
+interface TemplateGlobals {
+  today: string;       // yyyy-MM-dd, page's local timezone
+  now: string;         // ISO-ish timestamp yyyy-MM-dd HH:mm
+  current_user: string;// g_user.userName or ''
+  sys_id: string;      // g_form.getUniqueValue() or ''
+  host: string;
+}
+
+async function readTemplateGlobals(): Promise<TemplateGlobals> {
+  let current_user = '';
+  let sys_id = '';
+  if (chrome.scripting?.executeScript) {
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (tab?.id) {
+        const [{ result }] = await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          world: 'MAIN',
+          func: () => {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const w = window as any;
+            return {
+              user: w.g_user?.userName ?? '',
+              sys: w.g_form?.getUniqueValue?.() ?? '',
+            };
+          },
+        });
+        if (result) {
+          current_user = String(result.user ?? '');
+          sys_id = String(result.sys ?? '');
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  const d = new Date();
+  const pad = (n: number) => n.toString().padStart(2, '0');
+  const today = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  const now = `${today} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return {
+    today,
+    now,
+    current_user,
+    sys_id,
+    host: location.hostname,
+  };
+}
+
+function applyTemplateVars(input: string, g: TemplateGlobals): string {
+  if (input == null) return input;
+  let s = input;
+  s = s.replaceAll('{{today}}', g.today);
+  s = s.replaceAll('{{now}}', g.now);
+  s = s.replaceAll('{{current_user}}', g.current_user);
+  s = s.replaceAll('{{sys_id}}', g.sys_id);
+  s = s.replaceAll('{{host}}', g.host);
+  return s;
+}
+
+interface FillResult { ok: boolean; error?: string }
+
+async function fillOneItem(
+  entry: FieldEntry,
+  item: FieldGroupItem,
+  globals: TemplateGlobals,
+): Promise<FillResult> {
+  if (entry.field_type === 'reference') {
+    if (!entry.ref_sys_id) {
+      return { ok: false, error: 'reference entry is missing a ref_sys_id' };
+    }
+    // 3-arg setValue(name, sys_id, display) saves both value + visible text.
+    const gformOk = await tryGformSetValue({
+      field_name: entry.field_name,
+      type: entry.field_type,
+      value: entry.ref_sys_id,
+      display_value: entry.ref_display_value,
+    });
+    if (gformOk.ok) return gformOk;
+    // DOM fallback: hidden sys_id input + visible display field.
+    return setReferenceByDom(entry.field_name, entry.ref_sys_id, entry.ref_display_value);
+  }
+
+  const rawValue = item.override_value !== undefined && item.override_value !== null
+    ? item.override_value
+    : (entry.value ?? '');
+  const value = applyTemplateVars(rawValue, globals);
+  const gformOk = await tryGformSetValue({
+    field_name: entry.field_name,
+    type: entry.field_type,
+    value,
+  });
+  if (gformOk.ok) return gformOk;
+  return setSimpleByDom(entry.field_name, value, entry.field_type);
+}
+
+async function tryGformSetValue(args: {
+  field_name: string;
+  type: string;
+  value: string;
+  display_value?: string;
+}): Promise<FillResult> {
+  if (!chrome.scripting?.executeScript) return { ok: false, error: 'no scripting API' };
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab?.id) return { ok: false, error: 'no active tab' };
+    const [{ result }] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      world: 'MAIN',
+      args: [args.field_name, args.value, args.display_value, args.type],
+      func: (fn: string, val: string, disp: string | undefined, _type: string) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const g = (window as any).g_form as any;
+        if (!g || typeof g.setValue !== 'function') {
+          return { ok: false, error: 'g_form.setValue not available' };
+        }
+        try {
+          if (disp !== undefined && disp !== null && disp !== '') {
+            g.setValue(fn, val, disp);
+          } else {
+            g.setValue(fn, val);
+          }
+          return { ok: true };
+        } catch (err) {
+          return {
+            ok: false,
+            error: err instanceof Error ? err.message : String(err),
+          };
+        }
+      },
+    });
+    return (result as FillResult | null) ?? { ok: false, error: 'no result' };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+function setSimpleByDom(
+  fieldName: string,
+  value: string,
+  _type: string,
+): FillResult {
+  const input =
+    document.querySelector<HTMLInputElement>(`input[name="${fieldName}"]`) ??
+    (document.querySelector<HTMLTextAreaElement>(`textarea[name="${fieldName}"]`)) ??
+    (document.querySelector<HTMLSelectElement>(`select[name="${fieldName}"]`));
+  if (!input) return { ok: false, error: `no DOM element with name="${fieldName}"` };
+  try {
+    const proto = Object.getPrototypeOf(input);
+    const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+    if (desc && typeof desc.set === 'function') {
+      desc.set.call(input, value);
+    } else {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (input as any).value = value;
+    }
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+function setReferenceByDom(
+  fieldName: string,
+  sysId: string,
+  displayValue: string | undefined,
+): FillResult {
+  const hidden =
+    document.querySelector<HTMLInputElement>(`input[name="${fieldName}"]`);
+  const display =
+    document.querySelector<HTMLInputElement>(`input[name="sys_display.${fieldName}"]`) ??
+    document.querySelector<HTMLInputElement>(`input[id="${fieldName}_display"]`);
+  if (!hidden) return { ok: false, error: `no sys_id input for name="${fieldName}"` };
+  const fire = (el: HTMLElement, v: string) => {
+    try {
+      const proto = Object.getPrototypeOf(el);
+      const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+      if (desc && typeof desc.set === 'function') desc.set.call(el, v);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      else (el as any).value = v;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    } catch (err) {
+      console.warn('[sn-helper] dom fallback set failed', el, err);
+    }
+  };
+  fire(hidden, sysId);
+  if (display && displayValue !== undefined) fire(display, displayValue);
+  return { ok: true };
 }
 
 // ===========================================================================

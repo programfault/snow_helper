@@ -9,12 +9,12 @@
 //   content -> panel: chrome.runtime.sendMessage(message)
 //                     + chrome.runtime.onMessage filtered by sender.tab.id
 
-import type { FieldEntry } from './types';
+import type { FieldEntry, FieldGroup } from './types';
 
 // Re-export so callers can import types alongside messages without reaching
 // into the types module separately.
 export type { FieldEntry };
-export type { FieldType, FieldGroup } from './types';
+export type { FieldType, FieldGroup, FieldGroupItem } from './types';
 
 // ---------------------------------------------------------------------------
 // Side panel -> Content script  (chrome.tabs.sendMessage)
@@ -25,7 +25,14 @@ export type PanelToContentMessage =
   | { kind: 'PANEL_START_PICKER' }
   | { kind: 'PANEL_CANCEL_PICKER' }
   // Phase 3 — field fill
-  | { kind: 'PANEL_FILL_GROUP'; group_id: string }
+  // The panel sends the expanded group + fields snapshot so the content
+  // script does not need to (and can not directly, from isolated world)
+  // read the extension's chrome.storage.local.
+  | {
+      kind: 'PANEL_FILL_GROUP';
+      group: FieldGroup;
+      fields: Record<string, FieldEntry>;
+    }
   // Phase 4 — service invocation (routed via SW, but content script
   // intercepts this and forwards context to the SW)
   | { kind: 'PANEL_INVOKE_SERVICE'; service_id: string };
@@ -37,19 +44,32 @@ export type PanelToContentMessage =
 export type ContentToPanelMessage =
   | {
       kind: 'CONTENT_TOAST';
-      level: 'info' | 'success' | 'error';
+      level: 'info' | 'success' | 'error' | 'warning';
       text: string;
       detail?: string;
     }
   // Phase 2 — picker results
   | { kind: 'CONTENT_FIELD_CAPTURED'; entry: FieldEntry }
   | { kind: 'CONTENT_PICKER_CANCELLED'; reason?: string }
-  // Phase 3 — fill results
+  // Phase 3 — fill results. Per-item success + errors allow the panel to
+  // build an actionable success/error toast (including template-variable
+  // failures, DOM-fallback "no element found", and orphan entries).
   | {
       kind: 'CONTENT_FILL_RESULT';
-      ok: boolean;
-      filled_count: number;
-      detail?: string;
+      group_id: string;
+      group_name: string;
+      /** True if every item was filled without errors. */
+      success: boolean;
+      /** Number of items that filled successfully. */
+      success_count: number;
+      /** Number of items that failed to fill. */
+      error_count: number;
+      results: Array<{
+        field_name: string;
+        display: string;
+        ok: boolean;
+        error?: string;
+      }>;
     }
   // Phase 4 — service invocation result (forwarded from SW)
   | {
