@@ -758,7 +758,14 @@ async function fillOneItem(
     });
     if (gformOk.ok) return gformOk;
     // DOM fallback: hidden sys_id input + visible display field.
-    return setReferenceByDom(entry.field_name, entry.ref_sys_id, entry.ref_display_value);
+    const refResult = setReferenceByDom(entry.field_name, entry.ref_sys_id, entry.ref_display_value);
+    if (refResult.ok) return refResult;
+    // Last resort: if no hidden sys_id field exists on the current form
+    // (e.g. the field isn't actually a reference, or the hidden input
+    // isn't rendered in this form view), fall back to writing the display
+    // value into the visible input — same as a simple string field.
+    const displayValue = entry.ref_display_value ?? entry.ref_sys_id ?? '';
+    return setSimpleByDom(entry.field_name, displayValue, entry.field_type);
   }
 
   const rawValue = item.override_value !== undefined && item.override_value !== null
@@ -823,7 +830,10 @@ function setSimpleByDom(
   const input =
     document.querySelector<HTMLInputElement>(`input[name="${fieldName}"]`) ??
     (document.querySelector<HTMLTextAreaElement>(`textarea[name="${fieldName}"]`)) ??
-    (document.querySelector<HTMLSelectElement>(`select[name="${fieldName}"]`));
+    (document.querySelector<HTMLSelectElement>(`select[name="${fieldName}"]`)) ??
+    // Fallback: try the sys_display. prefixed visible input (ServiceNow
+    // reference fields expose a visible display input with this prefix).
+    document.querySelector<HTMLInputElement>(`input[name="sys_display.${fieldName}"]`);
   if (!input) return { ok: false, error: `no DOM element with name="${fieldName}"` };
   try {
     const proto = Object.getPrototypeOf(input);
