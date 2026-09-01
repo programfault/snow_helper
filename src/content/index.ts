@@ -435,6 +435,16 @@ async function captureFromElement(el: Element): Promise<FieldEntry | null> {
     }
   } else {
     base.value = (root as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement).value ?? '';
+    // DOM fallback for <select>: capture the selected option's display text
+    // as display_value (so users see "New" instead of "1" in the UI).
+    if (tag === 'select') {
+      const sel = root as HTMLSelectElement;
+      const opt = sel.selectedOptions?.[0] ?? sel.options[sel.selectedIndex ?? 0];
+      const optText = opt?.text?.trim();
+      if (optText && optText !== base.value) {
+        base.display_value = optText;
+      }
+    }
   }
   // If both MAIN world and DOM gave us something, prefer MAIN world
   // values — they are the authoritative g_form representation.
@@ -443,6 +453,8 @@ async function captureFromElement(el: Element): Promise<FieldEntry | null> {
   if (gFormInfo?.value !== undefined && gFormInfo.value !== null && fieldType !== 'reference') {
     base.value = String(gFormInfo.value);
   }
+  // display_value: g_form wins over DOM (it's richer).
+  if (gFormInfo?.display_value) base.display_value = gFormInfo.display_value;
 
   // Skip entries where we captured nothing useful.
   if (
@@ -506,6 +518,7 @@ async function tryGformProbe(fieldName: string): Promise<
       ref_display_value?: string;
       value?: unknown;
       table_sys_id?: string;
+      display_value?: string;
     }
   | null
 > {
@@ -559,18 +572,27 @@ async function tryGformProbe(fieldName: string): Promise<
           const fieldType = ft ? (typeMap[ft] ?? 'string') : undefined;
           // For reference fields g.get returns the sys_id; display is separate.
           const isRef = fieldType === 'reference' || (rawValue && typeof rawValue === 'string' && /^[0-9a-f]{32}$/.test(rawValue));
+          // Non-reference display (choice/dropdown labels). Only include if
+          // the display is meaningfully different from the raw value.
+          const displayValue =
+            !isRef && typeof display === 'string' &&
+            String(rawValue ?? '') !== display
+              ? display
+              : undefined;
           return {
             field_type: fieldType,
             ref_sys_id: isRef && typeof rawValue === 'string' ? rawValue : undefined,
             ref_display_value: isRef ? display : undefined,
             value: typeof rawValue === 'string' ? rawValue : rawValue,
             table_sys_id: tableId,
+            display_value: displayValue,
           } as {
             field_type?: FieldType;
             ref_sys_id?: string;
             ref_display_value?: string;
             value?: unknown;
             table_sys_id?: string;
+            display_value?: string;
           };
         } catch {
           return null;

@@ -35,6 +35,17 @@ export interface FieldEntry {
   /** Simple-typed value (string/integer/boolean/journal/datetime/decimal). */
   value?: string;
   /**
+   * Display text for choice / dropdown / select fields.
+   *   - e.g. state field: value="1", display_value="New"
+   *   - For reference fields use ref_display_value; for simple string fields
+   *     that are just free text this is usually undefined.
+   * Set by capture (from g_form getDisplayValue or selected option text).
+   * Used in UIs so users see readable labels instead of numeric indices.
+   * When filling the form back, we STILL write `value` to the input, since
+   * that's what ServiceNow needs on submit.
+   */
+  display_value?: string;
+  /**
    * Record sys_id at capture time. (Original key `table_sys_id` is kept
    * for backwards compatibility with data captured prior to the rename;
    * the field represents the record this field was captured from.)

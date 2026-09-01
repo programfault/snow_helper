@@ -10,7 +10,6 @@
 //     tab)
 
 import type { ContentToPanelMessage, FieldEntry, FieldGroup, PanelToContentMessage } from '../shared/messages';
-import { abbrevSysId } from '../shared/messages';
 import {
   mutateStorage,
   onStorageChanged,
@@ -178,7 +177,7 @@ async function handleFieldCaptured(entry: FieldEntry): Promise<void> {
     'success',
     summary,
     entry.field_type === 'reference'
-      ? `${entry.ref_display_value || '—'} · sys_id ${abbrevSysId(entry.ref_sys_id || '')}`
+      ? entry.ref_display_value || '—'
       : truncate(entry.value ?? '', 80),
   );
 }
@@ -356,15 +355,27 @@ function renderGroupCard(group: FieldGroup, shape: StorageShape): HTMLElement {
       const val = document.createElement('span');
       val.className = 'panel-group-item-value';
       if (entry && entry.field_type === 'reference') {
-        // Show display value + abbreviated sys_id
+        // Show only display value — sys_id is internal, not user-visible.
         const disp = entry.ref_display_value ?? '(no display)';
-        const sysId = entry.ref_sys_id ? ` · ${abbrevSysId(entry.ref_sys_id)}` : '';
-        val.textContent = `${disp}${sysId}`;
-        val.title = entry.ref_sys_id ?? '';
+        val.textContent = disp;
+        val.title = disp;
       } else if (entry) {
-        const v = it.override_value ?? entry.value ?? '';
-        val.textContent = v.length > 40 ? v.slice(0, 40) + '…' : v || '(blank)';
-        val.title = v;
+        const rawValue = it.override_value ?? entry.value ?? '';
+        // For choice/select fields: prefer the readable display_value (if
+        // available and no override was set — overrides are user-entered so
+        // we show them verbatim).
+        const shown = it.override_value
+          ? rawValue
+          : (entry.display_value || rawValue);
+        // Truncate to 40 chars; full content in hover tooltip.
+        const maxLen = 40;
+        val.textContent = shown.length > maxLen ? shown.slice(0, maxLen) + '…' : (shown || '(blank)');
+        // Tooltip: display_value + actual submission value if different.
+        const parts = [shown || '(blank)'];
+        if (entry.display_value && rawValue !== '' && entry.display_value !== rawValue) {
+          parts.push(`\n(value: ${rawValue})`);
+        }
+        val.title = parts.join('');
       }
 
       li.append(label, val);

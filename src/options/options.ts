@@ -427,14 +427,20 @@ function renderGroupItemRow(
   if (entry.field_type === 'reference') {
     const preset = document.createElement('em');
     preset.className = 'options-meta';
-    preset.textContent =
-      `Preset: ${entry.ref_display_value ?? '(no display)'} · ${entry.ref_sys_id ? abbrevSysId(entry.ref_sys_id) : 'n/a'}`;
+    preset.textContent = `Preset: ${entry.ref_display_value ?? '(no display)'}`;
     bottom.appendChild(preset);
   } else {
     const ta = document.createElement('textarea');
     ta.className = 'options-input options-textarea options-textarea-compact';
     ta.rows = entry.field_type === 'journal' ? 2 : 1;
-    ta.placeholder = `Preset: ${truncateForTitle(entry.value ?? '(empty)')}`;
+    // Placeholder: show readable display_value (for choice) or raw value.
+    // If display differs from value, include both "display (val)".
+    const disp = entry.display_value;
+    const val = entry.value ?? '';
+    const presetStr = disp && disp !== val
+      ? `${disp} (${val})`
+      : (val || '(empty)');
+    ta.placeholder = `Preset: ${truncateForTitle(presetStr)}`;
     ta.title = 'Override value. Templates: {{today}} {{now}} {{sys_id}} {{current_user}}';
     ta.value = it.override_value ?? '';
     ta.addEventListener('input', () => {
@@ -564,14 +570,16 @@ function wireEntrySearch(): void {
       right.className = 'entry-search-row-value';
       if (entry.field_type === 'reference') {
         right.textContent = entry.ref_display_value ?? '';
-        if (entry.ref_sys_id) {
-          const small = document.createElement('span');
-          small.className = 'options-meta';
-          small.textContent = ` · sys_id ${abbrevSysId(entry.ref_sys_id)}`;
-          right.appendChild(small);
-        }
+        right.title = entry.ref_display_value ?? '';
       } else {
-        right.textContent = truncateForTitle(entry.value ?? '');
+        // For choice fields prefer display_value as the readable label;
+        // the raw value is accessible via tooltip when they differ.
+        const display = entry.display_value ?? entry.value ?? '';
+        const rawVal = entry.value ?? '';
+        right.textContent = truncateForTitle(display || rawVal);
+        right.title = display && display !== rawVal
+          ? `${display}\n(value: ${rawVal})`
+          : display || rawVal;
       }
       row.append(left, right);
       // Double-click to add (per user spec). On add, re-render both panes:

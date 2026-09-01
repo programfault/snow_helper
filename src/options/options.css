@@ -618,7 +618,9 @@ body {
 
 .entry-search-row {
   display: grid;
-  grid-template-columns: minmax(0, 2fr) minmax(180px, 1.5fr);
+  /* Left: label+type+field_meta, takes as much as needed but capped so
+     right value column always gets room. Right: value ellipsis-truncated. */
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
   gap: 8px;
   width: 100%;
   text-align: left;
@@ -653,11 +655,18 @@ body {
   flex-wrap: wrap;
   align-items: center;
   gap: 6px;
+  min-width: 0;
 }
 
 .entry-search-row-name {
   font-weight: 600;
   font-size: 13px;
+  /* Never wrap the display name so the left side stays readable;
+     ellipsis if even the name is impossibly long. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
 }
 
 .entry-search-row-value {
@@ -667,6 +676,7 @@ body {
   text-overflow: ellipsis;
   white-space: nowrap;
   text-align: right;
+  min-width: 0;
 }
 
 .group-items-list {

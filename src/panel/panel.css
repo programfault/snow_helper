@@ -456,7 +456,9 @@ body {
 
 .panel-group-item {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(80px, auto);
+  /* Label fixed 100px so it's always visible; value takes remaining space
+     with ellipsis truncation. */
+  grid-template-columns: 100px minmax(0, 1fr);
   gap: 6px 10px;
   align-items: center;
   font-size: 12px;
@@ -478,4 +480,6 @@ body {
   text-overflow: ellipsis;
   white-space: nowrap;
   text-align: right;
+  min-width: 0;
+  /* Hover tooltip shows full value via title attribute (set in JS). */
 }
