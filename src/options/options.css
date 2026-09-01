@@ -723,10 +723,12 @@ body {
   gap: 4px;
 }
 
-.group-form-override {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
+/* Compact textarea for override values — minimal vertical footprint. */
+.options-textarea-compact {
+  font-size: 12px;
+  padding: 4px 8px;
+  min-height: 28px;
+  resize: vertical;
 }
 
 .group-form-item-actions {

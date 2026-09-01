@@ -428,24 +428,19 @@ function renderGroupItemRow(
     const preset = document.createElement('em');
     preset.className = 'options-meta';
     preset.textContent =
-      `Preset reference: ${entry.ref_display_value ?? '(no display)'} · sys_id ${entry.ref_sys_id ? abbrevSysId(entry.ref_sys_id) : 'n/a'} — override disabled (reference fields always use the entry's sys_id)`;
+      `Preset: ${entry.ref_display_value ?? '(no display)'} · ${entry.ref_sys_id ? abbrevSysId(entry.ref_sys_id) : 'n/a'}`;
     bottom.appendChild(preset);
   } else {
-    const label = document.createElement('label');
-    label.className = 'group-form-override';
-    const small = document.createElement('span');
-    small.className = 'options-label options-label--small';
-    small.innerHTML = `Override value <span class="options-help">(leave blank to use the library preset: <code>${escapeHtml(entry.value ?? '(empty)')}</code>). Templates: {{today}} {{now}} {{sys_id}} {{current_user}}</span>`;
     const ta = document.createElement('textarea');
-    ta.className = 'options-input options-textarea';
-    ta.rows = entry.field_type === 'journal' ? 4 : 2;
+    ta.className = 'options-input options-textarea options-textarea-compact';
+    ta.rows = entry.field_type === 'journal' ? 2 : 1;
     ta.placeholder = `Preset: ${truncateForTitle(entry.value ?? '(empty)')}`;
+    ta.title = 'Override value. Templates: {{today}} {{now}} {{sys_id}} {{current_user}}';
     ta.value = it.override_value ?? '';
     ta.addEventListener('input', () => {
       it.override_value = ta.value.length === 0 ? undefined : ta.value;
     });
-    label.append(small, ta);
-    bottom.appendChild(label);
+    bottom.appendChild(ta);
   }
   main.append(top, bottom);
 
@@ -492,6 +487,9 @@ function renderGroupItemRow(
       document.getElementById('group-items') as HTMLOListElement,
       items,
     );
+    // Refresh the Available pane so the removed entry reappears there.
+    const search = document.getElementById('entry-search') as HTMLInputElement | null;
+    search?.dispatchEvent(new Event('input', { bubbles: true }));
   });
   actions.append(up, down, remove);
 
@@ -501,15 +499,6 @@ function renderGroupItemRow(
 
 function truncateForTitle(s: string): string {
   return s.length > 60 ? `${s.slice(0, 60)}…` : s;
-}
-
-function escapeHtml(s: string): string {
-  return s
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#39;');
 }
 
 // ==========================================================================
@@ -524,11 +513,11 @@ function wireEntrySearch(): void {
     if (!dialogState) return;
     const shape = await readStorage();
     const q = input.value.trim();
-    // When query is empty: show all entries (sorted by recency).
-    // When query is non-empty: fuzzy-match and sort by score.
-    const allEntries = Object.values(shape.fields).sort(
-      (a, b) => b.captured_at - a.captured_at,
-    );
+    // Entries already picked in the right pane — hide them from "Available".
+    const currentRefs = new Set(dialogState.items.map((it) => it.entry_ref));
+    const allEntries = Object.values(shape.fields)
+      .filter((e) => !currentRefs.has(e.id))
+      .sort((a, b) => b.captured_at - a.captured_at);
     const entries =
       q.length === 0
         ? allEntries
@@ -537,23 +526,20 @@ function wireEntrySearch(): void {
             .filter((x) => x.score > 0)
             .sort((a, b) => b.score - a.score || b.entry.captured_at - a.entry.captured_at)
             .map((x) => x.entry);
-    const currentRefs = new Set(dialogState.items.map((it) => it.entry_ref));
     results.innerHTML = '';
-    // In the two-column layout, the list is always visible (never hidden).
+    // The Available list is always visible.
     results.hidden = false;
     const availableCount = document.getElementById('available-count');
     if (availableCount) availableCount.textContent = `${entries.length}`;
-    if (entries.length === 0 && q.length > 0) {
-      const empty = document.createElement('div');
-      empty.className = 'options-meta';
-      empty.textContent = 'No entries match. Try a different query.';
-      results.appendChild(empty);
-      return;
-    }
     if (entries.length === 0) {
       const empty = document.createElement('div');
       empty.className = 'options-meta';
-      empty.textContent = 'Field library is empty. Capture fields from a ServiceNow form first.';
+      empty.textContent =
+        q.length > 0
+          ? 'No entries match. Try a different query.'
+          : currentRefs.size > 0
+            ? 'All field library entries are already in this group.'
+            : 'Field library is empty. Capture fields from a ServiceNow form first.';
       results.appendChild(empty);
       return;
     }
@@ -561,12 +547,7 @@ function wireEntrySearch(): void {
       const row = document.createElement('button');
       row.type = 'button';
       row.className = 'entry-search-row';
-      if (currentRefs.has(entry.id)) {
-        row.classList.add('entry-search-row--used');
-      }
-      row.title = currentRefs.has(entry.id)
-        ? 'Already in this group — click again to add a duplicate'
-        : `Add "${displayFieldName(entry)}" to the group`;
+      row.title = `Double-click to add "${displayFieldName(entry)}" to the group`;
       const left = document.createElement('div');
       left.className = 'entry-search-row-main';
       const name = document.createElement('span');
@@ -593,16 +574,19 @@ function wireEntrySearch(): void {
         right.textContent = truncateForTitle(entry.value ?? '');
       }
       row.append(left, right);
-      row.addEventListener('click', () => {
+      // Double-click to add (per user spec). On add, re-render both panes:
+      // the entry disappears from Available (it's now "used"), and appears
+      // in the right pane.
+      row.addEventListener('dblclick', () => {
         if (!dialogState) return;
         dialogState.items.push({ entry_ref: entry.id });
+        // Re-render right pane.
         renderGroupItemsList(
           document.getElementById('group-items') as HTMLOListElement,
           dialogState.items,
         );
-        // Keep focus on search box for fast chaining of multiple picks.
-        input.focus();
-        input.select();
+        // Re-render Available list (removes the just-added entry).
+        void run();
       });
       results.appendChild(row);
     }
