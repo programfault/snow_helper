@@ -176,6 +176,24 @@ body {
 
 /* Phase 2 additions -------------------------------------------------------- */
 
+/* Title bar: top of the side panel — holds action buttons (settings, add field).
+   Compact, brand-soft background, right-aligned actions. */
+.panel-titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 6px 12px;
+  background: var(--brand-soft, #ede9fe);
+  border-bottom: 1px solid var(--border);
+}
+
+.panel-titlebar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .panel-section-head {
   display: flex;
   align-items: center;

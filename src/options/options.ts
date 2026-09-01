@@ -346,10 +346,12 @@ function openGroupDialog(state: NonNullable<typeof dialogState>): void {
   nameInput.required = true;
   descInput.value = state.description;
   renderGroupItemsList(itemsList, state.items);
-  // Reset search box + close search results.
+  // Reset search box and populate the "Available" pane.
   const search = $<HTMLInputElement>('entry-search');
   search.value = '';
-  $<HTMLDivElement>('entry-search-results').hidden = true;
+  // Trigger the input handler so the available list renders immediately
+  // (even with an empty query — the handler shows all entries when empty).
+  search.dispatchEvent(new Event('input', { bubbles: true }));
   if (!dlg.open) dlg.showModal();
 }
 
@@ -361,10 +363,13 @@ function closeGroupDialog(): void {
 
 function renderGroupItemsList(root: HTMLOListElement, items: FieldGroupItem[]): void {
   root.innerHTML = '';
+  // Update the "In this group" count badge.
+  const countEl = document.getElementById('selected-count');
+  if (countEl) countEl.textContent = `${items.length}`;
   if (items.length === 0) {
     const li = document.createElement('li');
     li.className = 'group-items-empty';
-    li.textContent = 'No items yet — search and pick entries above.';
+    li.textContent = 'No items yet — pick entries from the left pane.';
     root.appendChild(li);
     return;
   }
@@ -518,21 +523,39 @@ function wireEntrySearch(): void {
   const run = async () => {
     if (!dialogState) return;
     const shape = await readStorage();
-    const q = input.value;
-    const entries = Object.values(shape.fields)
-      .map((e) => ({ entry: e, score: fuzzyScore(q, e) }))
-      .filter((x) => x.score > 0)
-      .sort((a, b) => b.score - a.score || b.entry.captured_at - a.entry.captured_at)
-      .slice(0, 20)
-      .map((x) => x.entry);
+    const q = input.value.trim();
+    // When query is empty: show all entries (sorted by recency).
+    // When query is non-empty: fuzzy-match and sort by score.
+    const allEntries = Object.values(shape.fields).sort(
+      (a, b) => b.captured_at - a.captured_at,
+    );
+    const entries =
+      q.length === 0
+        ? allEntries
+        : allEntries
+            .map((e) => ({ entry: e, score: fuzzyScore(q, e) }))
+            .filter((x) => x.score > 0)
+            .sort((a, b) => b.score - a.score || b.entry.captured_at - a.entry.captured_at)
+            .map((x) => x.entry);
     const currentRefs = new Set(dialogState.items.map((it) => it.entry_ref));
     results.innerHTML = '';
-    results.hidden = entries.length === 0;
-    if (entries.length === 0 && q.trim().length > 0) {
+    // In the two-column layout, the list is always visible (never hidden).
+    results.hidden = false;
+    const availableCount = document.getElementById('available-count');
+    if (availableCount) availableCount.textContent = `${entries.length}`;
+    if (entries.length === 0 && q.length > 0) {
       const empty = document.createElement('div');
       empty.className = 'options-meta';
       empty.textContent = 'No entries match. Try a different query.';
       results.appendChild(empty);
+      return;
+    }
+    if (entries.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'options-meta';
+      empty.textContent = 'Field library is empty. Capture fields from a ServiceNow form first.';
+      results.appendChild(empty);
+      return;
     }
     for (const entry of entries) {
       const row = document.createElement('button');

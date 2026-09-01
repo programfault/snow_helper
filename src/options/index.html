@@ -98,16 +98,27 @@
                 <div class="options-field">
                   <div class="options-label-row">
                     <span class="options-label">Fields in this group</span>
-                    <span class="options-help">Add entries from the field library. Override values only affect non-reference fields (reference items always use the entry's sys_id + display).</span>
+                    <span class="options-help">Pick entries from the field library (left) to add to this group (right). Override values only affect non-reference fields (reference items always use the entry's sys_id + display).</span>
                   </div>
 
-                  <!-- Entry adder: filter by alias/label/field_name, pick one to append -->
-                  <div class="group-entry-adder">
-                    <input id="entry-search" type="text" class="options-input" placeholder="Search entries by alias / label / field name…" />
-                    <div id="entry-search-results" class="entry-search-results" hidden></div>
+                  <!-- Two-column layout: available (left) | selected (right) -->
+                  <div class="group-two-col">
+                    <div class="group-two-col-pane group-two-col-available">
+                      <div class="group-two-col-head">
+                        <span class="group-two-col-title">Available</span>
+                        <span class="options-dim options-meta" id="available-count"></span>
+                      </div>
+                      <input id="entry-search" type="text" class="options-input" placeholder="Search entries by alias / label / field name…" />
+                      <div id="entry-search-results" class="entry-search-results" hidden></div>
+                    </div>
+                    <div class="group-two-col-pane group-two-col-selected">
+                      <div class="group-two-col-head">
+                        <span class="group-two-col-title">In this group</span>
+                        <span class="options-dim options-meta" id="selected-count"></span>
+                      </div>
+                      <ol id="group-items" class="group-items-list" aria-label="Group items"></ol>
+                    </div>
                   </div>
-
-                  <ol id="group-items" class="group-items-list" aria-label="Group items"></ol>
                 </div>
               </div>
               <footer class="options-dialog-foot">

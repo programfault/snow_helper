@@ -546,6 +546,56 @@ body {
   border-top: 1px solid var(--border);
 }
 
+/* ===== Two-column group editor (Available | In this group) ===== */
+.group-two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  margin-top: 8px;
+}
+
+.group-two-col-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 320px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+  background: var(--bg);
+}
+
+.group-two-col-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 4px 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+.group-two-col-title {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.group-two-col-pane .entry-search-results {
+  position: static;
+  box-shadow: none;
+  border: 0;
+  padding: 0;
+  flex: 1 1 auto;
+  overflow-y: auto;
+  max-height: none;
+}
+
+.group-two-col-pane .group-items-list {
+  flex: 1 1 auto;
+  overflow-y: auto;
+}
+
+/* Legacy single-column fallback (kept for compat with existing rules). */
 .group-entry-adder {
   position: relative;
   margin-bottom: 12px;

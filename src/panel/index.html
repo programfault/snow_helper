@@ -8,29 +8,20 @@
   </head>
   <body>
     <div id="root" class="panel-root">
+      <header class="panel-titlebar">
+        <div class="panel-titlebar-actions">
+          <button id="btn-settings" class="panel-icon-button" title="Open settings" type="button">⚙</button>
+          <button id="btn-picker" class="panel-primary-button" type="button">+ Field</button>
+        </div>
+      </header>
       <main class="panel-body">
-        <section class="panel-section" id="section-fields">
-          <div class="panel-section-head panel-collapsible-head" data-target="fields-root">
-            <h2 class="panel-section-title">Field Library</h2>
-            <div class="panel-section-head-actions">
-              <button id="btn-settings" class="panel-icon-button" title="Open settings" type="button">⚙</button>
-              <button id="btn-picker" class="panel-primary-button" type="button">Add Field</button>
-              <button class="panel-collapse-toggle" type="button" title="Collapse/expand" aria-expanded="false">▼</button>
-            </div>
-          </div>
-          <div class="panel-collapsible-body" data-for="fields-root">
-            <p id="fields-empty" class="panel-empty">
-              No fields captured yet. Click <strong>Add Field</strong> to start
-              the element picker, then click a ServiceNow form field on the page.
-            </p>
-            <div id="fields-root" class="panel-field-lib" aria-label="Field library"></div>
-          </div>
-        </section>
-
         <section class="panel-section" id="section-groups">
           <div class="panel-section-head">
             <h2 class="panel-section-title">Field Groups</h2>
-            <button id="btn-groups-settings" class="panel-ghost-button" type="button">Manage Groups</button>
+            <div class="panel-section-head-actions">
+              <button id="btn-collapse-all" class="panel-ghost-button" type="button" title="Collapse all groups">Collapse All</button>
+              <button id="btn-groups-settings" class="panel-ghost-button" type="button">Manage Groups</button>
+            </div>
           </div>
           <p id="groups-empty" class="panel-empty">No groups yet. Click <strong>Manage Groups</strong> to create one.</p>
           <div id="groups-root" class="panel-groups" aria-label="Field groups"></div>
