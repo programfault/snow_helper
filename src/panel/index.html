@@ -10,8 +10,7 @@
     <div id="root" class="panel-root">
       <header class="panel-titlebar">
         <div class="panel-titlebar-actions">
-          <button id="btn-settings" class="panel-icon-button" title="Open settings" type="button">⚙</button>
-          <button id="btn-manage-playbooks" class="panel-ghost-button" type="button" title="Create or import playbooks">Playbooks</button>
+          <button id="btn-settings" class="panel-icon-button" title="Open SRE Helper settings" type="button">⚙</button>
         </div>
       </header>
       <main class="panel-body">
@@ -20,10 +19,11 @@
           <div class="panel-section-head">
             <h2 class="panel-section-title">Playbooks</h2>
             <div class="panel-section-head-actions">
+              <button id="btn-manage-playbooks" class="panel-ghost-button" type="button" title="Create, import, or edit playbook YAMLs">Manage Playbooks</button>
               <button id="btn-refresh-form-context" class="panel-ghost-button" type="button" title="Refresh SN form context (table/sysId/state)">Refresh Context</button>
             </div>
           </div>
-          <p id="playbooks-empty" class="panel-empty">No playbooks yet. Click <strong>⚙ → Playbooks</strong> (top-right) to create or import a YAML playbook. Two built-in examples (Reassign / Close) should appear once the storage is seeded.</p>
+          <p id="playbooks-empty" class="panel-empty">No playbooks yet. Click <strong>Manage Playbooks</strong> above to create or import a YAML. Two built-in examples (Reassign / Close) should appear once the storage is seeded.</p>
           <div id="playbooks-root" class="panel-playbooks" aria-label="Multi-step workflow playbooks"></div>
         </section>
 
