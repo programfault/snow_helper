@@ -51,7 +51,7 @@ export function displayFieldName(entry: {
 function fuzzyScore(query: string, entry: FieldEntry): number {
   const q = query.trim().toLowerCase();
   if (!q) return 1;
-  const hay = [entry.alias, entry.label, entry.field_name, entry.ref_display_value]
+  const hay = [entry.alias, entry.label, entry.field_name, entry.ref_display_value, entry.display_value]
     .filter((x): x is string => !!x && x.trim().length > 0)
     .join(' ')
     .toLowerCase();
@@ -62,6 +62,7 @@ function fuzzyScore(query: string, entry: FieldEntry): number {
   if (entry.label?.toLowerCase().includes(q)) score += 3;
   if (entry.field_name.toLowerCase().includes(q)) score += 2;
   if (entry.ref_display_value?.toLowerCase().includes(q)) score += 2;
+  if (entry.display_value?.toLowerCase().includes(q)) score += 2;
   return score;
 }
 
@@ -148,15 +149,23 @@ function renderFieldRow(entry: FieldEntry): HTMLTableRowElement {
     sys.title = entry.ref_sys_id ?? '';
     valueTd.append(disp, sys);
   } else {
-    const v = entry.value ?? '';
-    if (v === '') {
+    // For choice/dropdown fields prefer the readable display_value; the
+    // raw submission value is still accessible via the hover tooltip when
+    // they differ. We always fill with `value` — display is purely cosmetic.
+    const rawVal = entry.value ?? '';
+    const shown = entry.display_value ?? rawVal;
+    if (shown === '' && rawVal === '') {
       valueTd.textContent = '(empty)';
       valueTd.classList.add('options-dim');
-    } else if (v.length > 80) {
-      valueTd.textContent = v.slice(0, 80) + '…';
-      valueTd.title = v;
     } else {
-      valueTd.textContent = v;
+      // Visible text: the display (or value if no display exists).
+      valueTd.textContent = shown.length > 80 ? shown.slice(0, 80) + '…' : shown;
+      // Hover tooltip: show both when they differ for full transparency.
+      if (entry.display_value && entry.display_value !== rawVal) {
+        valueTd.title = `${entry.display_value}\n(value: ${rawVal})`;
+      } else {
+        valueTd.title = shown;
+      }
     }
   }
 
@@ -318,8 +327,22 @@ function renderGroupCard(group: FieldGroup, shape: StorageShape): HTMLElement {
         right.innerHTML = `<em>${entry.ref_display_value ?? '(no display)'}</em>`;
         right.classList.add('options-meta');
       } else if (entry) {
-        right.textContent = entry.value ?? '';
-        right.classList.add('options-cell-value', 'options-dim');
+        // Preset display: for choice fields show display_value instead of
+        // the raw numeric index; raw value shown in tooltip on hover.
+        const rawVal = entry.value ?? '';
+        const shown = entry.display_value ?? rawVal;
+        if (shown === '' && rawVal === '') {
+          right.textContent = '(empty preset)';
+          right.classList.add('options-cell-value', 'options-dim');
+        } else {
+          right.textContent = shown.length > 60 ? shown.slice(0, 60) + '…' : shown;
+          right.classList.add('options-cell-value', 'options-dim');
+          if (entry.display_value && entry.display_value !== rawVal) {
+            right.title = `${entry.display_value}\n(value: ${rawVal})`;
+          } else {
+            right.title = shown;
+          }
+        }
       }
       li.append(left, right);
       itemsList.appendChild(li);

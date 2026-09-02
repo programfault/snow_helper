@@ -435,15 +435,17 @@ async function captureFromElement(el: Element): Promise<FieldEntry | null> {
     }
   } else {
     base.value = (root as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement).value ?? '';
-    // DOM fallback for <select>: capture the selected option's display text
-    // as display_value (so users see "New" instead of "1" in the UI).
-    if (tag === 'select') {
-      const sel = root as HTMLSelectElement;
-      const opt = sel.selectedOptions?.[0] ?? sel.options[sel.selectedIndex ?? 0];
-      const optText = opt?.text?.trim();
-      if (optText && optText !== base.value) {
-        base.display_value = optText;
-      }
+    // Capture display_value for choice/dropdown fields so the UI shows a
+    // readable label (e.g. "New") instead of the raw numeric value (e.g. "1").
+    // We try several ServiceNow DOM patterns in priority order:
+    //   1. Native <select> → selected option text
+    //   2. Custom choice wrapper that hides a real <select> (find nearest one)
+    //   3. Classic .select2 / .sn-choice visible label spans
+    //   4. Next-experience choice: aria-selected="true" or .snc-choice-selected
+    //   5. Fallback: walk up to form-group and grab any adjacent display span
+    if (!base.display_value) {
+      const dv = extractChoiceDisplayFromDom(root, base.value ?? '');
+      if (dv) base.display_value = dv;
     }
   }
   // If both MAIN world and DOM gave us something, prefer MAIN world
@@ -497,6 +499,133 @@ function classifyTypeFromDom(tag: string, typeAttr: string, root: Element): Fiel
     return 'datetime';
   }
   return 'string';
+}
+
+/**
+ * Try to extract the visible display text for a choice/dropdown field
+ * from the DOM, since ServiceNow renders choice fields in several ways:
+ *
+ *   1. Native `<select>` (old forms) — grab selected option text
+ *   2. Hidden `<select>` inside a wrapper (classic custom widget) — locate
+ *      it via form-group ancestor and read selected option
+ *   3. Classic .select2 / .sn-choice wrappers with a visible label span
+ *      (e.g. `.select2-chosen`, `.select2-selection__rendered`,
+ *      `.sn-choice-label`, `.select2-selection--single [title]`)
+ *   4. Next Experience / Workspace: selected item marked with
+ *      `[aria-selected="true"]` or class `.snc-choice-selected`
+ *   5. Last resort: any sibling span/div whose text content matches a
+ *      non-empty value and is visibly different from the raw index.
+ *
+ * Returns the display text string, or undefined when nothing reliable is
+ * found. Caller should still prefer g_form.getDisplayValue() (MAIN-world)
+ * over this DOM-derived value when both are available.
+ */
+function extractChoiceDisplayFromDom(
+  root: Element,
+  rawValue: string,
+): string | undefined {
+  const candidateTexts: string[] = [];
+
+  // -- 1. Native <select> on the root itself --
+  const tag = root.tagName.toLowerCase();
+  if (tag === 'select') {
+    const sel = root as HTMLSelectElement;
+    const opt = sel.selectedOptions?.[0] ?? sel.options[sel.selectedIndex ?? 0];
+    const t = opt?.text?.trim();
+    if (t && t !== rawValue) candidateTexts.push(t);
+  }
+
+  // -- 2. Walk up to form-group and search for a hidden sibling <select> --
+  //    ServiceNow wraps all inputs in .form-group in Classic. Workspace
+  //    often uses [data-name] containers. We look up to 6 levels.
+  let container: Element | null = root;
+  for (let i = 0; i < 6 && container; i++) {
+    if (
+      container.classList?.contains('form-group') ||
+      container.classList?.contains('snFormWrapper') ||
+      container.hasAttribute?.('data-uib-type') ||
+      container.classList?.contains('snc-form-control-wrapper')
+    ) {
+      break;
+    }
+    container = container.parentElement;
+  }
+  if (container) {
+    // Hidden sibling select (classic "custom" choice still uses a real
+    // <select> under the hood with display:none, and we read its option).
+    const hiddenSelect = container.querySelector<HTMLSelectElement>(
+      'select[name], select[id]',
+    );
+    if (hiddenSelect && hiddenSelect !== root) {
+      const hsTag = hiddenSelect.tagName.toLowerCase();
+      if (hsTag === 'select') {
+        const opt =
+          hiddenSelect.selectedOptions?.[0] ??
+          hiddenSelect.options[hiddenSelect.selectedIndex ?? 0];
+        const t = opt?.text?.trim();
+        if (t && t !== rawValue && !candidateTexts.includes(t)) {
+          candidateTexts.push(t);
+        }
+      }
+    }
+
+    // -- 3. Classic select2 / sn-choice visible labels --
+    const select2Chosen = container.querySelector<HTMLElement>(
+      '.select2-chosen, .select2-selection__rendered, .sn-choice-label, .sn-multi-label',
+    );
+    if (select2Chosen) {
+      const t = select2Chosen.textContent?.trim();
+      if (t && t !== rawValue && !candidateTexts.includes(t)) {
+        candidateTexts.push(t);
+      }
+    }
+    // select2-selection often stores the display in its title attribute.
+    const selectionWithTitle = container.querySelector<HTMLElement>(
+      '[class*="select2-selection"][title], .sn-choice[title]',
+    );
+    if (selectionWithTitle) {
+      const t = selectionWithTitle.getAttribute('title')?.trim();
+      if (t && t !== rawValue && !candidateTexts.includes(t)) {
+        candidateTexts.push(t);
+      }
+    }
+
+    // -- 4. Next Experience / Workspace: look for the selected choice item --
+    const nxSelected = container.querySelector<HTMLElement>(
+      '[role="option"][aria-selected="true"], .snc-choice-selected, .now-label',
+    );
+    if (nxSelected) {
+      const t = nxSelected.textContent?.trim();
+      if (t && t !== rawValue && !candidateTexts.includes(t)) {
+        candidateTexts.push(t);
+      }
+    }
+    // Also: the visible text input next to a choice arrow may hold display.
+    const nxDisplay = container.querySelector<HTMLElement>(
+      'input[readonly][class*="display"], span[class*="-display-value"], div[class*="-display"]',
+    );
+    if (nxDisplay) {
+      let t: string | undefined;
+      if (nxDisplay.tagName.toLowerCase() === 'input') {
+        t = (nxDisplay as HTMLInputElement).value?.trim();
+      } else {
+        t = nxDisplay.textContent?.trim();
+      }
+      if (t && t !== rawValue && !candidateTexts.includes(t)) {
+        candidateTexts.push(t);
+      }
+    }
+  }
+
+  // Pick the first non-empty candidate that is different from rawValue.
+  for (const c of candidateTexts) {
+    if (!c) continue;
+    // Filter out clearly meaningless strings.
+    if (c === rawValue) continue;
+    if (c === '-- None --' || c === '--None--') continue;
+    return c;
+  }
+  return undefined;
 }
 
 function isLikelySysId(s: string): boolean {

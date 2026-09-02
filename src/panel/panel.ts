@@ -156,6 +156,7 @@ async function handleFieldCaptured(entry: FieldEntry): Promise<void> {
           ref_sys_id: entry.ref_sys_id ?? dup.ref_sys_id,
           ref_display_value: entry.ref_display_value ?? dup.ref_display_value,
           value: entry.value ?? dup.value,
+          display_value: entry.display_value ?? dup.display_value,
           table_sys_id: entry.table_sys_id ?? dup.table_sys_id,
         };
         return {
@@ -173,12 +174,15 @@ async function handleFieldCaptured(entry: FieldEntry): Promise<void> {
     inserted.was_duplicate
       ? `Updated existing entry for ${entry.field_name}`
       : `Added ${entry.field_name}`;
+  // Toast detail: for reference fields use ref_display_value; for other
+  // fields prefer readable display_value (choice labels) over raw indices.
+  const detailRaw = entry.field_type === 'reference'
+    ? entry.ref_display_value || '—'
+    : (entry.display_value ?? entry.value ?? '');
   showToast(
     'success',
     summary,
-    entry.field_type === 'reference'
-      ? entry.ref_display_value || '—'
-      : truncate(entry.value ?? '', 80),
+    truncate(detailRaw, 80),
   );
 }
 
