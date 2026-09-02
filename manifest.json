@@ -1,13 +1,14 @@
 {
   "manifest_version": 3,
-  "name": "SN Helper",
+  "name": "SRE Helper",
   "version": "0.2.0",
-  "description": "ServiceNow form automation: field picker, business groups, remote services, token capture.",
+  "description": "SRE toolkit: ServiceNow form automation, globe.com.ph info capture, remote services, token capture.",
   "permissions": [
     "activeTab",
     "sidePanel",
     "storage",
-    "scripting"
+    "scripting",
+    "clipboardWrite"
   ],
   "host_permissions": [
     "http://localhost/*",
@@ -17,7 +18,7 @@
     "<all_urls>"
   ],
   "action": {
-    "default_title": "Toggle SN Helper side panel"
+    "default_title": "Toggle SRE Helper side panel"
   },
   "background": {
     "service_worker": "src/background/index.ts",

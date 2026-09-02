@@ -79,6 +79,23 @@ export type ContentToPanelMessage =
       status?: number;
       body?: unknown;
       error?: string;
+    }
+  // Per-site information pushed by the content script whenever it detects
+  // meaningful values on the active page. The panel renders these rows in
+  // the Information section with copy buttons.
+  //   - Sending undefined / empty string means "field not available on
+  //     this page". The panel hides unavailable fields so the UI stays
+  //     clean on unrelated sites.
+  //   - Fields are re-transmitted periodically (and on SPA navs / DOM
+  //     mutations) so re-login always surfaces the latest token/WO/SID.
+  | {
+      kind: 'CONTENT_INFO_UPDATED';
+      /** Bearer-formatted token for globe.com.ph — "Bearer <jwt...>" */
+      access_token?: string;
+      /** Work Order identifier for globe.com.ph work-order detail pages. */
+      work_order_id?: string;
+      /** Service ID extracted from the WO detail summary ("Service ID" h6). */
+      service_id?: string;
     };
 
 // ---------------------------------------------------------------------------

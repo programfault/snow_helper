@@ -2,7 +2,7 @@ import { defineConfig } from 'vite';
 import { crx } from '@crxjs/vite-plugin';
 import manifest from './manifest.json';
 
-// Vite config for the SN Helper Chrome extension.
+// Vite config for the SRE Helper Chrome extension.
 // - @crxjs/vite-plugin compiles the MV3 manifest and hot-reloads content
 //   scripts and the service worker during development.
 // - Output is written to ./dist and can be loaded as an unpacked extension.

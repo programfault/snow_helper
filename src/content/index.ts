@@ -25,6 +25,187 @@ let pickerTooltip: HTMLElement | null = null;  // DevTools-style field name / ty
 let teardownHandlers: Array<() => void> = [];
 let rafPending: number | null = null;
 
+// ---- Globe.com.ph per-site information extractor ----
+// SRE workflow: whenever the active page sits on *.globe.com.ph we
+// continuously pull:
+//   1. accessToken from localStorage (MAIN world) → formatted as "Bearer …"
+//   2. work order id → first <h6> within main.body-content / .body-content
+//   3. service id → the numeric text following the "Service ID" <h6> header
+// Values are broadcast to the side panel via CONTENT_INFO_UPDATED (with
+// undefined / empty string marking "not available on this page"). We
+// refresh on a short cadence to catch SPA navigations (no page reloads)
+// and new tokens issued after re-login.
+let globeInfoInterval: number | null = null;
+let globeInfoMo: MutationObserver | null = null;
+// Remember last-sent snapshot so we only push messages when something
+// actually changed. Cuts noise for the panel and avoids wasted renders.
+type GlobeSnapshot = {
+  access_token?: string;
+  work_order_id?: string;
+  service_id?: string;
+};
+let lastGlobeSent: GlobeSnapshot | null = null;
+
+async function ensureGlobeInfoWatcher(): Promise<void> {
+  if (!location.hostname.toLowerCase().includes('globe.com.ph')) return;
+  if (globeInfoInterval !== null) return; // already running
+
+  // Fire an initial snapshot immediately so the panel doesn't wait for the
+  // full interval tick on page load / side panel open.
+  void sendGlobeInfoSnapshot();
+
+  // 2 second poll is cheap and guarantees that re-auth + SPA route changes
+  // surface new values within a reasonable window without needing to hook
+  // framework internals.
+  globeInfoInterval = window.setInterval(() => {
+    void sendGlobeInfoSnapshot();
+  }, 2000);
+
+  // MutationObserver covers large DOM updates (SPA render completes,
+  // tab switches, form navigations) with lower latency than the 2s tick.
+  try {
+    globeInfoMo = new MutationObserver(() => {
+      void sendGlobeInfoSnapshot();
+    });
+    globeInfoMo.observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+    });
+  } catch {
+    globeInfoMo = null;
+  }
+  // Also re-check when the tab regains visibility (e.g. user comes back
+  // from another tab after 10 minutes) — visibilitychange is free.
+  const onVis = () => {
+    if (document.visibilityState === 'visible') void sendGlobeInfoSnapshot();
+  };
+  document.addEventListener('visibilitychange', onVis, true);
+  teardownHandlers.push(() => {
+    document.removeEventListener('visibilitychange', onVis, true);
+  });
+}
+
+async function sendGlobeInfoSnapshot(): Promise<void> {
+  const [accessToken, workOrderId, serviceId] = await Promise.all([
+    readGlobeAccessToken(),
+    Promise.resolve(extractGlobeWorkOrderId()),
+    Promise.resolve(extractGlobeServiceId()),
+  ]);
+  // Bearer format requested by user — "Bearer xxx" exactly.
+  const access_token = accessToken ? `Bearer ${accessToken}` : undefined;
+  const snap: GlobeSnapshot = {
+    access_token: access_token || undefined,
+    work_order_id: workOrderId || undefined,
+    service_id: serviceId || undefined,
+  };
+  // Only post when something differs from the last push.
+  if (!snapshotsEqual(snap, lastGlobeSent)) {
+    lastGlobeSent = snap;
+    postToPanel({
+      kind: 'CONTENT_INFO_UPDATED',
+      access_token: snap.access_token,
+      work_order_id: snap.work_order_id,
+      service_id: snap.service_id,
+    } as ContentToPanelMessage);
+  }
+}
+
+function snapshotsEqual(a: GlobeSnapshot | null, b: GlobeSnapshot | null): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return a.access_token === b.access_token &&
+    a.work_order_id === b.work_order_id &&
+    a.service_id === b.service_id;
+}
+
+/**
+ * Read the accessToken key from the PAGE's localStorage (MAIN world).
+ * Content scripts run in an "isolated world" that does NOT share storage
+ * with the page — only MAIN-world JS can see the real localStorage values.
+ * Uses chrome.scripting.executeScript({world:'MAIN'}) via the same tab-id
+ * shim used by the g_form probe.
+ *
+ * Returns the raw token string (e.g. a JWT), or undefined when not found.
+ * Caller wraps it with "Bearer " prefix before display / clipboard copy.
+ */
+async function readGlobeAccessToken(): Promise<string | undefined> {
+  if (!chrome.scripting?.executeScript) return undefined;
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab?.id) return undefined;
+    const [{ result }] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id, allFrames: false },
+      world: 'MAIN',
+      func: () => {
+        try {
+          const raw = (window as unknown as { localStorage?: Storage }).localStorage
+            ?.getItem('accessToken');
+          if (typeof raw === 'string' && raw.length > 0) return raw;
+          return undefined;
+        } catch {
+          return undefined;
+        }
+      },
+    });
+    return (result as string | undefined)?.trim() || undefined;
+  } catch {
+    // Scripting failures are non-fatal: the panel simply shows N/A until
+    // the next successful read.
+    return undefined;
+  }
+}
+
+/**
+ * Extract the Work Order identifier following the user's reference script:
+ *   const body = document.querySelector('main.body-content, .body-content');
+ *   const firstH6 = body ? body.querySelector('h6') : null;
+ *   return firstH6?.textContent?.trim()
+ *
+ * The user also refers to this field as "work order id". Returns undefined
+ * when the container/h6 is missing, which the panel treats as "not on a
+ * work order detail page right now".
+ */
+function extractGlobeWorkOrderId(): string | undefined {
+  const bodyEl = document.querySelector<HTMLElement>('main.body-content, .body-content');
+  const firstH6 = bodyEl?.querySelector?.('h6') as HTMLElement | null | undefined;
+  const txt = firstH6?.textContent?.trim();
+  if (!txt) return undefined;
+  return txt;
+}
+
+/**
+ * Extract the Service ID per the user's bookmarklet: find the <h6> whose
+ * text content is exactly "Service ID", climb to its parent, scan all
+ * descendant text nodes, and pull the first text that either matches a
+ * number or is the first non-header piece of text. Then prefer the
+ * numeric portion (match(/\d+/)) when one exists.
+ *
+ * Errors / missing elements are swallowed and return undefined — the user
+ * explicitly asked "no errors".
+ */
+function extractGlobeServiceId(): string | undefined {
+  try {
+    const h6Els = Array.from(document.querySelectorAll('h6'));
+    const target = h6Els.find((el) => el.textContent?.trim() === 'Service ID');
+    if (!target) return undefined;
+    const parent = target.parentElement;
+    if (!parent) return undefined;
+    const allTexts = Array.from(parent.querySelectorAll('*'))
+      .map((el) => el.textContent?.trim() ?? '')
+      .filter((t) => t && t !== 'Service ID');
+    if (allTexts.length === 0) return undefined;
+    // Prefer first text that actually contains digits (most likely the
+    // Service ID number); otherwise fall back to whatever else is there.
+    const digitText = allTexts.find((t) => /\d+/.test(t)) ?? allTexts[0];
+    if (!digitText) return undefined;
+    const numericMatch = digitText.match(/\d+/);
+    return numericMatch ? numericMatch[0] : digitText;
+  } catch {
+    return undefined;
+  }
+}
+
 // (Colors for the DevTools-style selection rect are now baked inline into
 // the overlay element styles in drawRect / startPicker so they don't need
 // a separate named constant.)
@@ -128,7 +309,7 @@ async function startPicker(): Promise<void> {
 
   // Status pill at the bottom of the viewport.
   pickerBadge = document.createElement('div');
-  pickerBadge.textContent = 'SN Helper picker active — click a field, Esc to cancel';
+  pickerBadge.textContent = 'SRE Helper picker active — click a field, Esc to cancel';
   pickerBadge.setAttribute(
     'style',
     [
@@ -1058,3 +1239,7 @@ function postToPanel(msg: ContentToPanelMessage): void {
 }
 
 ensureInjected();
+// Globe.com.ph per-site info runs regardless of picker state. Called here
+// rather than inline at the top of the file so all message wiring is
+// guaranteed to be in place before we start sending updates to the panel.
+void ensureGlobeInfoWatcher();

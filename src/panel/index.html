@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>SN Helper Panel</title>
+    <title>SRE Helper Panel</title>
     <link rel="stylesheet" href="./panel.css" />
   </head>
   <body>
@@ -27,15 +27,19 @@
           <div id="groups-root" class="panel-groups" aria-label="Field groups"></div>
         </section>
 
+        <!-- Information: site-specific details (e.g. globe.com.ph tokens, WO/SID).
+             This section was previously called "Token Status" — renamed and
+             expanded to hold any per-site information, including the access
+             token and work order identifiers used by SRE workflows. -->
+        <section class="panel-section">
+          <h2 class="panel-section-title">Information</h2>
+          <ul id="info-list" class="panel-info-list" aria-label="Site information"></ul>
+        </section>
+
         <section class="panel-section">
           <h2 class="panel-section-title">Services</h2>
           <p id="services-empty" class="panel-empty">No services yet. Define them in Settings.</p>
           <ul id="services-list" class="panel-list" aria-label="Remote services"></ul>
-        </section>
-
-        <section class="panel-section">
-          <h2 class="panel-section-title">Token Status</h2>
-          <ul id="tokens-list" class="panel-token-list" aria-label="Token capture status"></ul>
         </section>
       </main>
 

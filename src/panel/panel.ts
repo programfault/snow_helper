@@ -17,6 +17,18 @@ import {
   type StorageShape,
 } from '../shared/storage';
 
+// ---------------------------------------------------------------------------
+// Per-site information snapshot (populated by the content script's
+// CONTENT_INFO_UPDATED messages, e.g. access token / WO id / service id
+// on globe.com.ph).
+// ---------------------------------------------------------------------------
+type SiteInfo = {
+  access_token?: string;
+  work_order_id?: string;
+  service_id?: string;
+};
+let latestSiteInfo: SiteInfo = {};
+
 // ==========================================================================
 // Toast
 // ==========================================================================
@@ -116,6 +128,16 @@ async function handleContentMessage(
     case 'CONTENT_SERVICE_RESULT':
       // Phase 4
       break;
+    case 'CONTENT_INFO_UPDATED': {
+      // Track the latest snapshot and re-render the Information section.
+      latestSiteInfo = {
+        access_token: msg.access_token,
+        work_order_id: msg.work_order_id,
+        service_id: msg.service_id,
+      };
+      renderInformation();
+      break;
+    }
     default: {
       // Exhaustiveness check; TS errors if a new kind is not handled.
       const _n: never = msg;
@@ -417,6 +439,159 @@ async function runFillGroup(group: FieldGroup, shape: StorageShape): Promise<voi
 }
 
 // ==========================================================================
+// Information section: per-site fields (tokens, WO ids, SIDs, …) rendered
+// from the latest CONTENT_INFO_UPDATED snapshot.
+//
+// Rendering rules:
+//   - Each row has a label, truncated value (mono), and a Copy button.
+//   - Fields that are currently unavailable are hidden (not rendered) so
+//     unrelated sites show an empty-state note instead of dead rows.
+//   - "access token" copies the "Bearer …" string verbatim.
+//   - "work order id" and "service id" both copy `wo: xxx\nsid: xxx` per
+//     the user's existing bookmarklet workflow.
+// ==========================================================================
+
+/**
+ * Copy text to the system clipboard. Uses navigator.clipboard.writeText
+ * (available only in secure contexts, which Chrome extension panels are).
+ * Falls back to a textarea + execCommand trick when the modern API is not
+ * reachable (e.g. dev machines running on http), and reports success via
+ * the toast system so users see feedback.
+ */
+async function copyToClipboard(text: string, label: string): Promise<void> {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.left = '-9999px';
+      document.body.appendChild(ta);
+      ta.select();
+      try {
+        document.execCommand('copy');
+      } finally {
+        document.body.removeChild(ta);
+      }
+    }
+    showToast('success', `Copied ${label}`, 'Ready to paste.');
+  } catch (err) {
+    showToast('error', `Copy failed for ${label}`, String(err));
+  }
+}
+
+function buildWoSidPayload(info: SiteInfo): string {
+  // Matches the user's bookmarklet output exactly:
+  //   wo: <wo>\nsid: <sid>
+  // Uses "N/A" placeholder for whichever side is currently missing so the
+  // output is still a well-formed pair.
+  const wo = info.work_order_id?.trim() || 'N/A';
+  const sid = info.service_id?.trim() || 'N/A';
+  return `wo: ${wo}\nsid: ${sid}`;
+}
+
+/**
+ * Construct one row element for the Information section.
+ *
+ * @param label Visible label on the left (e.g. "access token").
+ * @param value Current value string — shown truncated, full content in
+ *              the hover tooltip + copied verbatim by the button.
+ * @param copyText Optional override of what gets copied (used when the
+ *                 button payload differs from the visible text, e.g. the
+ *                 combined wo:\nsid: string on the WO/SID rows). When
+ *                 omitted the raw value is copied.
+ * @param copyLabel Short label used in the success/failure toast so the
+ *                  user sees which button fired. Also used as the button
+ *                  title for accessibility.
+ */
+function renderInfoRow(
+  label: string,
+  value: string,
+  copyText: string | undefined,
+  copyLabel: string,
+): HTMLLIElement {
+  const li = document.createElement('li');
+  li.className = 'panel-info-row';
+
+  const lbl = document.createElement('span');
+  lbl.className = 'panel-info-row-label';
+  lbl.textContent = label;
+
+  const val = document.createElement('span');
+  val.className = 'panel-info-row-value';
+  // Truncate long tokens — user can hover or copy to see the full thing.
+  const maxLen = 28;
+  val.textContent = value.length > maxLen ? `${value.slice(0, maxLen)}…` : value;
+  val.title = value;
+
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'panel-info-copy-btn';
+  btn.textContent = 'Copy';
+  btn.title = `Copy ${copyLabel}`;
+  btn.addEventListener('click', () => {
+    const payload = copyText !== undefined ? copyText : value;
+    void copyToClipboard(payload, copyLabel);
+  });
+
+  li.append(lbl, val, btn);
+  return li;
+}
+
+function renderInformation(): void {
+  const root = document.getElementById('info-list') as HTMLUListElement | null;
+  if (!root) return;
+  root.replaceChildren();
+
+  const info = latestSiteInfo;
+  const rows: HTMLLIElement[] = [];
+
+  // 1. access token — "Bearer <jwt>". Copy exact Bearer string.
+  if (info.access_token && info.access_token.trim()) {
+    rows.push(renderInfoRow(
+      'access token',
+      info.access_token,
+      info.access_token,
+      'access token (Bearer format)',
+    ));
+  }
+
+  // 2. work order id. Visible value is just the WO id; copy payload is the
+  //    combined "wo:\nsid:" string so it matches the user's workflow.
+  if (info.work_order_id && info.work_order_id.trim()) {
+    rows.push(renderInfoRow(
+      'work order id',
+      info.work_order_id,
+      buildWoSidPayload(info),
+      'work order id + service id (wo: / sid: format)',
+    ));
+  }
+
+  // 3. service id. Same combined payload on Copy (single id alone is rarely
+  //    useful without its WO context).
+  if (info.service_id && info.service_id.trim()) {
+    rows.push(renderInfoRow(
+      'service id',
+      info.service_id,
+      buildWoSidPayload(info),
+      'work order id + service id (wo: / sid: format)',
+    ));
+  }
+
+  if (rows.length === 0) {
+    const empty = document.createElement('li');
+    empty.className = 'panel-info-empty';
+    empty.textContent =
+      'No site info available yet. Visit globe.com.ph to see access token / WO / SID here.';
+    root.appendChild(empty);
+    return;
+  }
+  root.append(...rows);
+}
+
+
+// ==========================================================================
 // Init
 // ==========================================================================
 
@@ -457,6 +632,7 @@ function wireCollapseAllButton(): void {
 
 function renderAll(shape: StorageShape): void {
   renderGroups(shape);
+  renderInformation();
 }
 
 async function init(): Promise<void> {
@@ -464,6 +640,9 @@ async function init(): Promise<void> {
   wirePickerButtons();
   wireGroupsShortcuts();
   wireCollapseAllButton();
+  // Paint the information section immediately so even before any content
+  // messages arrive users see the empty-state hint (not a blank box).
+  renderInformation();
   const initial = await readStorage();
   renderAll(initial);
   onStorageChanged(renderAll);
