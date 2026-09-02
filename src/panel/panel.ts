@@ -9,13 +9,31 @@
 //     the panel filters messages by sender.tab.id to isolate the active
 //     tab)
 
-import type { ContentToPanelMessage, FieldEntry, FieldGroup, PanelToContentMessage } from '../shared/messages';
+import type {
+  AssertStep,
+  ContentToPanelMessage,
+  DictEntry,
+  FieldEntry,
+  InputDef,
+  PanelToContentMessage,
+  PatchStep,
+  Playbook,
+  PlaybookStep,
+  WaitStep,
+} from '../shared/messages';
 import {
   mutateStorage,
   onStorageChanged,
   readStorage,
   type StorageShape,
 } from '../shared/storage';
+import {
+  interpolateString,
+  preparePatchPayload,
+  seedBuiltinPlaybooks,
+  type InterpolateContext,
+} from '../shared/playbook-engine';
+import { uuid } from '../shared/storage-helpers';
 
 // ---------------------------------------------------------------------------
 // Per-site information snapshot (populated by the content script's
@@ -28,6 +46,40 @@ type SiteInfo = {
   service_id?: string;
 };
 let latestSiteInfo: SiteInfo = {};
+
+// Playbook engine cache: populated by CONTENT_FORM_CONTEXT message before
+// a run starts so the engine can resolve trigger checks + ${current.*}.
+type FormContextSnapshot = {
+  on_servicenow: boolean;
+  table_name?: string;
+  sys_id?: string;
+  user_name?: string;
+  user_display?: string;
+  values?: Record<string, string>;
+  displays?: Record<string, string>;
+};
+let _cachedFormContext: FormContextSnapshot = { on_servicenow: false };
+// Stores the latest step result message until the Playbook runner consumes it.
+let _pendingStepResult: {
+  run_id: string;
+  step_index: number;
+  ok: boolean;
+  stopped?: boolean;
+  skipped?: boolean;
+  status?: number;
+  duration_ms: number;
+  body?: unknown;
+  error?: string;
+} | null = null;
+// Accessors so downstream consumers can still swap implementation without
+// touching the above storage variable names directly.
+export function getFormContext(): FormContextSnapshot { return _cachedFormContext; }
+export function setFormContext(c: FormContextSnapshot): void { _cachedFormContext = c; }
+export function takePendingStepResult(): typeof _pendingStepResult {
+  const r = _pendingStepResult;
+  _pendingStepResult = null;
+  return r;
+}
 
 // ==========================================================================
 // Toast
@@ -127,6 +179,30 @@ async function handleContentMessage(
     }
     case 'CONTENT_SERVICE_RESULT':
       // Phase 4
+      break;
+    case 'CONTENT_FORM_CONTEXT':
+      setFormContext({
+        on_servicenow: msg.on_servicenow,
+        table_name: msg.table_name,
+        sys_id: msg.sys_id,
+        user_name: msg.user_name,
+        user_display: msg.user_display,
+        values: msg.values,
+        displays: msg.displays,
+      });
+      break;
+    case 'CONTENT_PLAYBOOK_STEP_RESULT':
+      _pendingStepResult = {
+        run_id: msg.run_id,
+        step_index: msg.step_index,
+        ok: msg.ok,
+        stopped: msg.stopped,
+        skipped: msg.skipped,
+        status: msg.status,
+        duration_ms: msg.duration_ms,
+        body: msg.body,
+        error: msg.error,
+      };
       break;
     case 'CONTENT_INFO_UPDATED': {
       // Track the latest snapshot and re-render the Information section.
@@ -252,9 +328,10 @@ function truncate(s: string, n: number): string {
 // Picker button wiring
 // ==========================================================================
 
-let pickerBusy = false;
+let _pickerBusy = false;
 function setPickerBusy(b: boolean): void {
-  pickerBusy = b;
+  _pickerBusy = b;
+  void _pickerBusy; // silence unused-var; kept for future picker concurrency checks
   const sectionBtn = document.getElementById('btn-picker') as HTMLButtonElement | null;
   if (!sectionBtn) return;
   sectionBtn.disabled = b;
@@ -262,180 +339,6 @@ function setPickerBusy(b: boolean): void {
     ? 'Picker active on the page — click a field or press Esc to cancel'
     : 'Start element picker and click a ServiceNow form field';
   sectionBtn.textContent = b ? 'Picker active…' : '+ Field';
-}
-
-function wirePickerButtons(): void {
-  const sectionBtn = document.getElementById('btn-picker');
-  const start = async () => {
-    if (pickerBusy) return;
-    setPickerBusy(true);
-    try {
-      await sendToContent({ kind: 'PANEL_START_PICKER' });
-      showToast('info', 'Picker active', 'Click a ServiceNow form field, or press Esc to cancel');
-    } catch (err) {
-      setPickerBusy(false);
-      showToast('error', 'Picker failed', String(err));
-    }
-  };
-  sectionBtn?.addEventListener('click', () => void start());
-}
-
-function wireSettingsButton(): void {
-  const btn = document.getElementById('btn-settings');
-  btn?.addEventListener('click', () => {
-    if (chrome.runtime?.openOptionsPage) {
-      void chrome.runtime.openOptionsPage();
-    }
-  });
-}
-
-// ==========================================================================
-// Groups: rendering and Fill buttons
-// ==========================================================================
-
-function renderGroups(shape: StorageShape): void {
-  const root = document.getElementById('groups-root');
-  const empty = document.getElementById('groups-empty') as HTMLElement | null;
-  if (!root) return;
-  const groups = Object.values(shape.groups).sort(
-    (a, b) => b.updated_at - a.updated_at,
-  );
-  if (empty) empty.hidden = groups.length !== 0;
-  root.replaceChildren(
-    ...groups.map((g) => renderGroupCard(g, shape)),
-  );
-}
-
-function renderGroupCard(group: FieldGroup, shape: StorageShape): HTMLElement {
-  const card = document.createElement('article');
-  card.className = 'panel-group-card';
-
-  // --- Header: title + count + Fill button + collapse toggle ---
-  const head = document.createElement('div');
-  head.className = 'panel-group-card-head';
-
-  const toggle = document.createElement('button');
-  toggle.type = 'button';
-  toggle.className = 'panel-collapse-toggle';
-  toggle.title = 'Collapse/expand';
-  toggle.setAttribute('aria-expanded', 'false');
-  toggle.textContent = '▶';
-
-  const title = document.createElement('h3');
-  title.className = 'panel-group-card-title';
-  title.textContent = group.name;
-
-  // Description: always shown inline after the title, truncated with
-  // ellipsis. Full text in title attribute for hover tooltip.
-  let descInline: HTMLSpanElement | null = null;
-  if (group.description) {
-    descInline = document.createElement('span');
-    descInline.className = 'panel-group-card-desc-inline';
-    descInline.textContent = group.description;
-    descInline.title = group.description;
-  }
-
-  const pill = document.createElement('span');
-  pill.className = 'panel-meta';
-  pill.textContent = `${group.items.length}`;
-
-  const fillBtn = document.createElement('button');
-  fillBtn.type = 'button';
-  fillBtn.className = 'panel-primary-button panel-group-fill-btn';
-  fillBtn.textContent = 'Fill';
-  fillBtn.disabled = group.items.length === 0;
-  fillBtn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    void runFillGroup(group, shape);
-  });
-
-  head.append(toggle, title);
-  if (descInline) head.appendChild(descInline);
-  head.append(pill, fillBtn);
-  card.appendChild(head);
-
-  // --- Collapsible items body (default collapsed) ---
-  const items = document.createElement('ul');
-  items.className = 'panel-group-items';
-  items.hidden = true;
-  if (group.items.length === 0) {
-    const li = document.createElement('li');
-    li.className = 'panel-meta';
-    li.textContent = '(empty — Manage Groups to add fields)';
-    items.appendChild(li);
-  } else {
-    for (const it of group.items) {
-      const entry = shape.fields[it.entry_ref];
-      const li = document.createElement('li');
-      li.className = 'panel-group-item';
-
-      const label = document.createElement('span');
-      label.className = 'panel-group-item-name';
-      if (!entry) {
-        label.textContent = `(removed: ${it.entry_ref.slice(0, 8)})`;
-        label.classList.add('panel-error');
-      } else {
-        label.textContent = displayFieldName(entry);
-      }
-
-      const val = document.createElement('span');
-      val.className = 'panel-group-item-value';
-      if (entry && entry.field_type === 'reference') {
-        // Show only display value — sys_id is internal, not user-visible.
-        const disp = entry.ref_display_value ?? '(no display)';
-        val.textContent = disp;
-        val.title = disp;
-      } else if (entry) {
-        const rawValue = it.override_value ?? entry.value ?? '';
-        // For choice/select fields: prefer the readable display_value (if
-        // available and no override was set — overrides are user-entered so
-        // we show them verbatim).
-        const shown = it.override_value
-          ? rawValue
-          : (entry.display_value || rawValue);
-        // Truncate to 40 chars; full content in hover tooltip.
-        const maxLen = 40;
-        val.textContent = shown.length > maxLen ? shown.slice(0, maxLen) + '…' : (shown || '(blank)');
-        // Tooltip: display_value + actual submission value if different.
-        const parts = [shown || '(blank)'];
-        if (entry.display_value && rawValue !== '' && entry.display_value !== rawValue) {
-          parts.push(`\n(value: ${rawValue})`);
-        }
-        val.title = parts.join('');
-      }
-
-      li.append(label, val);
-      items.appendChild(li);
-    }
-  }
-  card.appendChild(items);
-
-  // --- Collapse wiring ---
-  toggle.addEventListener('click', () => {
-    const expanded = toggle.getAttribute('aria-expanded') === 'true';
-    toggle.setAttribute('aria-expanded', String(!expanded));
-    toggle.textContent = !expanded ? '▼' : '▶';
-    items.hidden = expanded;
-  });
-
-  return card;
-}
-
-async function runFillGroup(group: FieldGroup, shape: StorageShape): Promise<void> {
-  if (group.items.length === 0) return;
-  try {
-    await sendToContent({
-      kind: 'PANEL_FILL_GROUP',
-      group,
-      fields: shape.fields,
-    });
-  } catch (err) {
-    showToast(
-      'error',
-      `Failed to start fill for "${group.name}"`,
-      String(err),
-    );
-  }
 }
 
 // ==========================================================================
@@ -592,57 +495,680 @@ function renderInformation(): void {
 
 
 // ==========================================================================
-// Init
+// Playbook runner + UI (core new UX)
 // ==========================================================================
 
-function wireGroupsShortcuts(): void {
-  const btn = document.getElementById('btn-groups-settings');
-  btn?.addEventListener('click', () => {
-    if (chrome.runtime?.openOptionsPage) {
-      // openOptionsPage opens the options page; to auto-switch to the
-      // Groups tab we pass a query param via chrome.storage.session as
-      // a "next tab" hint that the options page reads on init.
-      void (async () => {
-        try {
-          await chrome.storage.session.set({ __options_tab_hint: 'groups' });
-        } catch {
-          /* session storage may be unavailable; options falls back to Field Library */
-        }
-        await chrome.runtime.openOptionsPage();
-      })();
-    }
+type StepUiStatus = 'pending' | 'running' | 'success' | 'error' | 'skipped';
+interface StepUiState {
+  status: StepUiStatus;
+  meta?: string;   // "320ms", "HTTP 200 · 450ms", "Timed out · 6000ms"
+  error?: string;
+}
+type PlaybookRunState = {
+  run_id: string;
+  started_at: number;
+  stepStates: StepUiState[];  // length === playbook.steps.length
+  finished: boolean;
+  summary?: string;
+  ok: boolean;
+  onDone: Promise<boolean>;
+};
+
+/** Keyed by playbook.id — only one concurrent run per playbook. */
+const activeRuns = new Map<string, PlaybookRunState>();
+
+// ----- Modal helper (reused for inputs dialog + confirmation prompts) -----
+type ModalCloseHandler = () => void;
+function openModal(params: {
+  title: string;
+  body: HTMLElement | DocumentFragment;
+  footer?: HTMLElement;
+  onClose?: ModalCloseHandler;
+  allowBackdropClose?: boolean;
+}): { close: ModalCloseHandler; dialog: HTMLElement } {
+  const root = document.getElementById('modal-root') as HTMLDivElement | null;
+  const titleEl = document.getElementById('modal-title') as HTMLHeadingElement | null;
+  const bodyEl = document.getElementById('modal-body') as HTMLDivElement | null;
+  const footerEl = document.getElementById('modal-footer') as HTMLDivElement | null;
+  const dialog = document.querySelector('.panel-modal-dialog') as HTMLDivElement | null;
+  if (!root || !titleEl || !bodyEl || !footerEl || !dialog) {
+    return { close: () => {}, dialog: dialog ?? document.body };
+  }
+  titleEl.textContent = params.title;
+  bodyEl.replaceChildren(params.body);
+  if (params.footer) {
+    footerEl.replaceChildren(params.footer);
+    footerEl.style.display = '';
+  } else {
+    footerEl.replaceChildren();
+    footerEl.style.display = 'none';
+  }
+  root.hidden = false;
+  root.setAttribute('aria-hidden', 'false');
+
+  const closeables = root.querySelectorAll<HTMLElement>('[data-modal-close]');
+  const onCloseClick = () => close();
+  const allowBackdrop = params.allowBackdropClose ?? true;
+  closeables.forEach((el) => {
+    if (!allowBackdrop && el.classList?.contains('panel-modal-backdrop')) return;
+    el.addEventListener('click', onCloseClick, { once: true });
   });
+  const rootRef = root as HTMLDivElement;
+  const titleRef = titleEl as HTMLHeadingElement;
+  const bodyRef = bodyEl as HTMLDivElement;
+  const footerRef = footerEl as HTMLDivElement;
+  function close() {
+    rootRef.hidden = true;
+    rootRef.setAttribute('aria-hidden', 'true');
+    titleRef.textContent = '';
+    bodyRef.replaceChildren();
+    footerRef.replaceChildren();
+    closeables.forEach((el) => el.removeEventListener('click', onCloseClick));
+    params.onClose?.();
+  }
+  return { close, dialog };
 }
 
-/** Wire the Collapse All button — collapses every group card's item list. */
-function wireCollapseAllButton(): void {
-  const btn = document.getElementById('btn-collapse-all');
-  btn?.addEventListener('click', () => {
-    const cards = document.querySelectorAll<HTMLElement>('#groups-root .panel-group-card');
-    cards.forEach((card) => {
-      const toggle = card.querySelector<HTMLButtonElement>('.panel-collapse-toggle');
-      const items = card.querySelector<HTMLElement>('.panel-group-items');
-      if (!toggle || !items) return;
-      toggle.setAttribute('aria-expanded', 'false');
-      toggle.textContent = '▶';
-      items.hidden = true;
+// ------------------- Inputs modal: returns user-filled values -------------------
+interface ResolvedInput {
+  value: string;
+  /** For select-type inputs, mirrors the selected option label. */
+  label?: string;
+}
+type InputsResult = Record<string, ResolvedInput>;
+
+/**
+ * Show the inputs modal (if the playbook actually declares any inputs).
+ * Returns the resolved values (with defaults applied). Skips the modal
+ * entirely when there are no inputs and resolves with an empty map.
+ */
+async function showInputsModal(
+  playbook: Playbook,
+  dict: Record<string, DictEntry>,
+  scopeTable?: string,
+): Promise<InputsResult | null> {
+  const defs = playbook.inputs ?? [];
+  // Resolve select options eagerly: expand options_from_dict using global
+  // dict + scopeTable, so the dropdown shows group/user/state labels from
+  // the dictionary directly.
+  const preparedDefs = await Promise.all(defs.map(async (def) => {
+    if (def.type !== 'select') return def;
+    if (def.options && def.options.length > 0) return def;
+    if (!def.options_from_dict) return def;
+    const { category, table } = def.options_from_dict;
+    const candidates = Object.values(dict).filter((d) => d.category === category);
+    const scoped = table
+      ? candidates.filter((d) => (d.table ?? '').toLowerCase() === table.toLowerCase() || !d.table)
+      : candidates;
+    // Filter by playbook trigger table if no explicit table in source.
+    const prefixed = !table && scopeTable
+      ? scoped.filter((d) => !d.table || d.table.toLowerCase() === scopeTable.toLowerCase())
+      : scoped;
+    return {
+      ...def,
+      options: prefixed.map((d) => ({ label: d.label ?? d.value, value: d.value })),
+    } as InputDef;
+  }));
+
+  if (preparedDefs.length === 0) return {};
+
+  const body = document.createElement('div');
+  body.style.display = 'flex';
+  body.style.flexDirection = 'column';
+  body.style.gap = '0';
+
+  // Input field elements: indexed parallel to preparedDefs.
+  const fields: Array<{ wrap: HTMLElement; input: HTMLElement; def: InputDef; errEl: HTMLElement | null }> = [];
+  preparedDefs.forEach((def) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'panel-input-row';
+    const label = document.createElement('label');
+    label.className = 'panel-input-label';
+    label.htmlFor = `pb-input-${def.key}`;
+    label.textContent = def.label;
+    if (def.required) {
+      const mark = document.createElement('span');
+      mark.className = 'required-mark';
+      mark.textContent = '*';
+      label.appendChild(mark);
+    }
+    wrap.appendChild(label);
+
+    let input: HTMLElement;
+    if (def.type === 'select') {
+      const sel = document.createElement('select');
+      sel.className = 'panel-input-select';
+      sel.id = `pb-input-${def.key}`;
+      (def.options ?? []).forEach((op) => {
+        const opt = document.createElement('option');
+        opt.value = op.value;
+        opt.textContent = op.label || op.value;
+        sel.appendChild(opt);
+      });
+      if (def.default !== undefined) {
+        sel.value = def.default;
+      }
+      input = sel;
+    } else if (def.type === 'textarea') {
+      const ta = document.createElement('textarea');
+      ta.className = 'panel-input-textarea';
+      ta.id = `pb-input-${def.key}`;
+      ta.rows = def.rows ?? 4;
+      if (def.placeholder) ta.placeholder = def.placeholder;
+      if (def.default !== undefined) ta.value = def.default;
+      input = ta;
+    } else {
+      const ip = document.createElement('input');
+      ip.className = 'panel-input-field';
+      ip.id = `pb-input-${def.key}`;
+      ip.type = def.type === 'number' ? 'number' : def.type === 'date' ? 'date' : 'text';
+      if (def.placeholder) ip.placeholder = def.placeholder;
+      if (def.default !== undefined) ip.value = def.default;
+      input = ip;
+    }
+    wrap.appendChild(input);
+    body.appendChild(wrap);
+    fields.push({ wrap, input, def, errEl: null });
+  });
+
+  // Submit + Cancel buttons in footer
+  const footer = document.createElement('div');
+  footer.style.display = 'contents';
+  const cancelBtn = document.createElement('button');
+  cancelBtn.type = 'button';
+  cancelBtn.className = 'panel-ghost-button';
+  cancelBtn.textContent = 'Cancel';
+  const submitBtn = document.createElement('button');
+  submitBtn.type = 'button';
+  submitBtn.className = 'panel-primary-button';
+  submitBtn.textContent = 'Run';
+  footer.append(cancelBtn, submitBtn);
+
+  return new Promise<InputsResult | null>((resolve) => {
+    const { close } = openModal({
+      title: `Parameters: ${playbook.name}`,
+      body,
+      footer,
+      allowBackdropClose: true,
+      onClose: () => resolve(null),
+    });
+    cancelBtn.addEventListener('click', () => { close(); resolve(null); });
+    submitBtn.addEventListener('click', () => {
+      const result: InputsResult = {};
+      let hasError = false;
+      fields.forEach(({ input, def, wrap, errEl: prevErr }) => {
+        if (prevErr) prevErr.remove();
+        const v = readInputValue(input);
+        if (def.required && (v === '' || v === undefined)) {
+          hasError = true;
+          const err = document.createElement('div');
+          err.className = 'panel-input-error';
+          err.textContent = `${def.label} is required.`;
+          wrap.appendChild(err);
+        } else {
+          result[def.key] = { value: v ?? '' };
+          if (def.type === 'select' && input instanceof HTMLSelectElement) {
+            const opt = input.options[input.selectedIndex];
+            result[def.key]!.label = opt?.text?.trim();
+          }
+        }
+      });
+      if (hasError) return;
+      close();
+      resolve(result);
     });
   });
 }
 
+function readInputValue(el: HTMLElement): string | undefined {
+  if (el instanceof HTMLSelectElement) return el.value;
+  if (el instanceof HTMLInputElement) return el.value;
+  if (el instanceof HTMLTextAreaElement) return el.value;
+  return undefined;
+}
+
+// --------------- Active form context: refreshes before each run -------------
+async function refreshFormContext(): Promise<void> {
+  try {
+    const res = await sendToContent({ kind: 'PANEL_GET_FORM_CONTEXT' });
+    if (res && typeof res === 'object' && 'on_servicenow' in res) {
+      const asAny = res as any;
+      setFormContext({
+        on_servicenow: !!asAny.on_servicenow,
+        table_name: asAny.table_name,
+        sys_id: asAny.sys_id,
+        user_name: asAny.user_name,
+        user_display: asAny.user_display,
+        values: asAny.values,
+        displays: asAny.displays,
+      });
+    }
+  } catch {
+    // Non-SN pages or the content script not yet injected: fall back to
+    // whatever cached value we had (defaults to not-on-SN).
+  }
+}
+
+// --------------- Interpolation context builder -----------------------------
+function buildInterpolateCtx(
+  shape: StorageShape,
+  playbook: Playbook,
+  inputs: InputsResult,
+): InterpolateContext {
+  const ctx = getFormContext();
+  const warnings: string[] = [];
+  const ipCtx: InterpolateContext = {
+    inputs,
+    inputDefs: playbook.inputs,
+    playbookInlineDict: playbook.inline_dict,
+    globalDict: shape.dict_entries,
+    scopeTable: playbook.trigger?.table ?? ctx.table_name,
+    currentValues: ctx.values,
+    currentDisplays: ctx.displays,
+    userName: ctx.user_name,
+    userDisplay: ctx.user_display,
+    fields: shape.fields,
+    groups: shape.groups,
+    onWarning: (m) => warnings.push(m),
+  };
+  // Keep warnings accessible from caller via leaked reference.
+  (ipCtx as any).__warnings = warnings;
+  return ipCtx;
+}
+
+// --------------- Per-playbook card rendering --------------------------------
+function renderPlaybookCard(playbook: Playbook, shape: StorageShape): HTMLElement {
+  const card = document.createElement('article');
+  card.className = 'panel-playbook-card';
+  card.dataset.playbookId = playbook.id;
+
+  const head = document.createElement('div');
+  head.className = 'panel-playbook-head';
+  const left = document.createElement('div');
+  left.style.minWidth = '0';
+  left.style.flex = '1 1 auto';
+
+  const title = document.createElement('h3');
+  title.className = 'panel-playbook-title';
+  title.textContent = playbook.name;
+  left.appendChild(title);
+
+  const meta = document.createElement('div');
+  meta.className = 'panel-playbook-meta';
+  const parts: string[] = [];
+  if (playbook.trigger?.table) parts.push(playbook.trigger.table);
+  parts.push(`${playbook.steps.length} step${playbook.steps.length === 1 ? '' : 's'}`);
+  if (playbook.builtin) parts.unshift('builtin');
+  meta.textContent = parts.join(' · ');
+  left.appendChild(meta);
+
+  const actions = document.createElement('div');
+  actions.className = 'panel-playbook-actions';
+  const runBtn = document.createElement('button');
+  runBtn.type = 'button';
+  runBtn.className = 'panel-primary-button';
+  runBtn.textContent = 'Run ▶';
+  runBtn.addEventListener('click', () => {
+    void runPlaybook(playbook, shape).catch((e) => showToast('error', `Failed to start ${playbook.name}`, String(e?.message ?? e)));
+  });
+  actions.appendChild(runBtn);
+  head.append(left, actions);
+  card.appendChild(head);
+
+  if (playbook.description) {
+    const desc = document.createElement('p');
+    desc.className = 'panel-playbook-desc';
+    desc.textContent = playbook.description;
+    card.appendChild(desc);
+  }
+
+  // Step list
+  const stepsEl = document.createElement('ol');
+  stepsEl.className = 'panel-playbook-steps';
+  playbook.steps.forEach((step, idx) => {
+    const li = document.createElement('li');
+    li.className = 'panel-pb-step pending';
+    li.dataset.stepIndex = String(idx);
+    const glyph = document.createElement('span');
+    glyph.className = 'panel-pb-step-glyph';
+    glyph.textContent = String(idx + 1);
+    const name = document.createElement('span');
+    name.className = 'panel-pb-step-name';
+    name.textContent = step.name ?? `${capitalizeStepType(step.type)} step`;
+    const metaEl = document.createElement('span');
+    metaEl.className = 'panel-pb-step-meta';
+    metaEl.textContent = 'pending';
+    li.append(glyph, name, metaEl);
+    stepsEl.appendChild(li);
+  });
+  card.appendChild(stepsEl);
+
+  // Summary row
+  const summary = document.createElement('div');
+  summary.className = 'panel-playbook-summary';
+  const leftSum = document.createElement('span');
+  leftSum.textContent = playbook.inputs && playbook.inputs.length > 0
+    ? `${playbook.inputs.length} parameter${playbook.inputs.length === 1 ? '' : 's'}`
+    : 'No parameters';
+  const rightSum = document.createElement('span');
+  rightSum.textContent = 'Ready';
+  rightSum.dataset.role = 'summary-right';
+  summary.append(leftSum, rightSum);
+  card.appendChild(summary);
+
+  // Apply any already-active run state to the freshly-rendered card (keeps
+  // UI consistent across storage re-renders while a run is in flight).
+  const run = activeRuns.get(playbook.id);
+  if (run) applyRunStateToCard(card, playbook, run);
+  return card;
+}
+
+function capitalizeStepType(t: PlaybookStep['type']): string {
+  return t === 'patch' ? 'Patch' : t === 'wait' ? 'Wait' : 'Assert';
+}
+
+function applyRunStateToCard(card: HTMLElement, pb: Playbook, run: PlaybookRunState): void {
+  card.classList.toggle('is-running', !run.finished);
+  pb.steps.forEach((_step, idx) => {
+    const li = card.querySelector<HTMLElement>(`.panel-pb-step[data-step-index="${idx}"]`);
+    const state = run.stepStates[idx];
+    if (!li || !state) return;
+    li.classList.remove('pending', 'running', 'success', 'error', 'skipped');
+    li.classList.add(state.status);
+    const glyph = li.querySelector<HTMLElement>('.panel-pb-step-glyph');
+    if (glyph) {
+      if (state.status === 'success') glyph.textContent = '✓';
+      else if (state.status === 'error') glyph.textContent = '!';
+      else if (state.status === 'skipped') glyph.textContent = '–';
+      else glyph.textContent = String(idx + 1);
+    }
+    const metaEl = li.querySelector<HTMLElement>('.panel-pb-step-meta');
+    if (metaEl) metaEl.textContent = state.meta ?? state.status;
+    // Clear + re-add error message
+    let errEl = li.querySelector<HTMLElement>('.panel-pb-step-error');
+    if (state.error) {
+      if (!errEl) {
+        errEl = document.createElement('div');
+        errEl.className = 'panel-pb-step-error';
+        li.appendChild(errEl);
+      }
+      errEl.textContent = state.error;
+    } else if (errEl) {
+      errEl.remove();
+    }
+  });
+  const sumRight = card.querySelector<HTMLElement>('[data-role="summary-right"]');
+  if (run.finished && sumRight) {
+    const total = run.stepStates.reduce((a, s) => a + parseDurationSuffix(s.meta), 0);
+    sumRight.textContent = run.ok
+      ? `OK · ${total}ms`
+      : `Failed · ${total}ms`;
+  } else if (!run.finished && sumRight) {
+    const done = run.stepStates.filter((s) => s.status !== 'pending').length;
+    sumRight.textContent = `Running · ${done}/${pb.steps.length}`;
+  }
+}
+
+function parseDurationSuffix(m?: string): number {
+  if (!m) return 0;
+  const r = /(\d+)ms/.exec(m);
+  return r ? parseInt(r[1], 10) : 0;
+}
+
+// --------------- Render all playbook cards ----------------------------------
+function renderPlaybooks(shape: StorageShape): void {
+  const root = document.getElementById('playbooks-root') as HTMLDivElement | null;
+  const empty = document.getElementById('playbooks-empty') as HTMLParagraphElement | null;
+  if (!root) return;
+  const list = Object.values(shape.playbooks).sort((a, b) => {
+    if (a.builtin !== b.builtin) return a.builtin ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+  if (empty) empty.style.display = list.length === 0 ? '' : 'none';
+  root.replaceChildren(...list.map((p) => renderPlaybookCard(p, shape)));
+}
+
+// --------------- Core: run a single playbook end-to-end --------------------
+async function runPlaybook(playbook: Playbook, shape: StorageShape): Promise<void> {
+  if (activeRuns.has(playbook.id)) {
+    showToast('warning', `${playbook.name} is already running`, 'Wait for it to finish before starting another run.');
+    return;
+  }
+
+  // 1. Refresh form context (table / sys_id / current values / display names)
+  //    from the MAIN world probe so trigger validation + interpolate ${current.*} are fresh.
+  await refreshFormContext();
+  const ctx = getFormContext();
+
+  // 2. Validate trigger.table/state against current form.
+  if (playbook.trigger?.table && ctx.table_name && playbook.trigger.table.toLowerCase() !== ctx.table_name.toLowerCase()) {
+    showToast('error', `${playbook.name} skipped`, `Playbook requires table "${playbook.trigger.table}", current form is "${ctx.table_name}".`);
+    return;
+  }
+  if (playbook.trigger?.require_state_in && ctx.values) {
+    const cur = ctx.values['state'];
+    if (cur !== undefined && !playbook.trigger.require_state_in.includes(cur)) {
+      showToast('warning', `${playbook.name}: state mismatch`, `Current state="${cur}". Playbook requires one of: [${playbook.trigger.require_state_in.join(', ')}]. Proceeding anyway.`);
+    }
+  }
+
+  // 3. Prompt for inputs (may return null on cancel).
+  const inputs = await showInputsModal(playbook, shape.dict_entries, playbook.trigger?.table ?? ctx.table_name);
+  if (inputs === null) return; // user cancelled
+
+  const runId = `pb_${Date.now().toString(36)}${uuid().slice(0, 6)}`;
+  const startedAt = performance.now();
+
+  // 4. Build interpolation context + interpolate each step patch payload.
+  const ipCtx = buildInterpolateCtx(shape, playbook, inputs);
+
+  // 5. Set up run UI state.
+  const stepStates: StepUiState[] = playbook.steps.map(() => ({ status: 'pending', meta: 'pending' }));
+  let runOk = true;
+  let stoppedEarly = false;
+  // Manual Promise.withResolvers replacement (tsconfig targets < ES2024).
+  let resolveDone: (ok: boolean) => void = () => {};
+  const onDone = new Promise<boolean>((r) => { resolveDone = r; });
+  const run: PlaybookRunState = {
+    run_id: runId,
+    started_at: Date.now(),
+    stepStates,
+    finished: false,
+    ok: true,
+    onDone,
+  };
+  activeRuns.set(playbook.id, run);
+
+  // Repaint the card to pick up 'is-running' class + running states.
+  const maybeRepaint = () => {
+    const card = document.querySelector<HTMLElement>(`[data-playbook-id="${playbook.id}"]`);
+    if (card) applyRunStateToCard(card, playbook, run);
+  };
+  maybeRepaint();
+
+  const toastOnEachError = true; // single-step failures use their own toast via policy below
+
+  // 6. Iterate steps.
+  let lastWarnings: string[] = [];
+  for (let i = 0; i < playbook.steps.length; i++) {
+    if (stoppedEarly) { stepStates[i].status = 'skipped'; stepStates[i].meta = 'skipped'; continue; }
+    const rawStep = playbook.steps[i];
+    stepStates[i] = { status: 'running', meta: 'running' };
+    maybeRepaint();
+
+    let stepMsg: { kind: 'PANEL_PLAYBOOK_RUN_STEP'; run_id: string; step_index: number; step: PlaybookStep };
+    if (rawStep.type === 'patch') {
+      // Interpolate payload (+ merge from_group, strip ?skip_empty empties).
+      const warnings: string[] = [];
+      const localCtx: InterpolateContext = { ...ipCtx, onWarning: (m) => warnings.push(m) };
+      const { payload, warnings: warns } = preparePatchPayload(rawStep as PatchStep, localCtx);
+      lastWarnings = warns.concat(warnings);
+      // Inject the *already-interpolated* payload into the step object we send
+      // (content script patch mock just echo's it back; live uses it verbatim).
+      const sentStep: PatchStep = { ...(rawStep as PatchStep), payload };
+      stepMsg = { kind: 'PANEL_PLAYBOOK_RUN_STEP', run_id: runId, step_index: i, step: sentStep };
+    } else {
+      // For wait/assert we need to interpolate equals / not_equals / one_of / match / equals_ref_sys_id strings
+      // so dictionary references resolve.
+      const base = { ...rawStep } as WaitStep | AssertStep;
+      const localCtx: InterpolateContext = { ...ipCtx };
+      if (base.type === 'wait') {
+        const w = base as WaitStep;
+        w.equals = w.equals !== undefined ? interpolateString(w.equals, localCtx).value : undefined;
+        w.not_equals = w.not_equals !== undefined ? interpolateString(w.not_equals, localCtx).value : undefined;
+        w.one_of = w.one_of?.map((s) => interpolateString(s, localCtx).value);
+        w.match = w.match !== undefined ? interpolateString(w.match, localCtx).value : undefined;
+      } else {
+        const a = base as AssertStep;
+        a.equals = a.equals !== undefined ? interpolateString(a.equals, localCtx).value : undefined;
+        a.not_equals = a.not_equals !== undefined ? interpolateString(a.not_equals, localCtx).value : undefined;
+        a.equals_ref_sys_id = a.equals_ref_sys_id !== undefined ? interpolateString(a.equals_ref_sys_id, localCtx).value : undefined;
+        a.match = a.match !== undefined ? interpolateString(a.match, localCtx).value : undefined;
+      }
+      stepMsg = { kind: 'PANEL_PLAYBOOK_RUN_STEP', run_id: runId, step_index: i, step: base };
+    }
+
+    const res = await sendStepMessageAndGetResult(runId, i, stepMsg, 180_000 /* 3 min */);
+    const metaParts: string[] = [];
+    if (res.status) metaParts.push(`HTTP ${res.status}`);
+    metaParts.push(`${res.duration_ms}ms`);
+    if (res.ok) {
+      stepStates[i] = { status: 'success', meta: metaParts.join(' · ') };
+    } else if (res.skipped) {
+      stepStates[i] = { status: 'skipped', meta: `skipped · ${metaParts.join(' · ')}`, error: res.error };
+    } else {
+      stepStates[i] = { status: 'error', meta: `failed · ${metaParts.join(' · ')}`, error: res.error };
+      runOk = false;
+      if (toastOnEachError) {
+        showToast('error', `${playbook.name} · step ${i + 1} failed`, res.error ?? `Step "${rawStep.name ?? capitalizeStepType(rawStep.type)}" failed.`);
+      }
+      if (res.stopped) { stoppedEarly = true; }
+    }
+    maybeRepaint();
+  }
+
+  run.finished = true;
+  run.ok = runOk && !stoppedEarly;
+  resolveDone(run.ok);
+  maybeRepaint();
+  activeRuns.delete(playbook.id);
+
+  const totalMs = Math.round(performance.now() - startedAt);
+  const n = playbook.steps.length;
+  if (run.ok) {
+    showToast('success', `${playbook.name} — done`, `All ${n} step${n === 1 ? '' : 's'} OK in ${totalMs}ms.`);
+  } else {
+    showToast('error', `${playbook.name} — ${stoppedEarly ? 'stopped' : 'failed'}`, `${run.stepStates.filter(s => s.status === 'error').length} failed / ${n} total (${totalMs}ms).`);
+  }
+  // If there were interpolation warnings (unknown expressions etc.) surface them
+  // on the last run to avoid spamming toasts per step.
+  if (lastWarnings.length > 0) {
+    showToast('warning', 'Playbook interpolation warnings', lastWarnings.slice(0, 5).join('; '));
+  }
+}
+
+/**
+ * Send PANEL_PLAYBOOK_RUN_STEP, then wait for the matching
+ * CONTENT_PLAYBOOK_STEP_RESULT message back (filtered by run_id + step_index).
+ * Falls back to polling `takePendingStepResult()` every 50ms to handle the
+ * global message listener path, with a safety timeout for tab-inactive hangs.
+ */
+async function sendStepMessageAndGetResult(
+  run_id: string,
+  step_index: number,
+  msg: any,
+  timeoutMs: number,
+): Promise<{ ok: boolean; stopped?: boolean; skipped?: boolean; status?: number; duration_ms: number; body?: unknown; error?: string }> {
+  const timeoutAt = Date.now() + timeoutMs;
+  // Send the step.
+  try {
+    await sendToContent(msg);
+  } catch (e: any) {
+    return { ok: false, stopped: true, duration_ms: 0, error: String(e?.message ?? e) };
+  }
+  // Poll via the pending-slot the global onMessage listener fills.
+  while (Date.now() < timeoutAt) {
+    const pending = takePendingStepResult();
+    if (pending && pending.run_id === run_id && pending.step_index === step_index) {
+      return {
+        ok: pending.ok,
+        stopped: pending.stopped,
+        skipped: pending.skipped,
+        status: pending.status,
+        duration_ms: pending.duration_ms,
+        body: pending.body,
+        error: pending.error,
+      };
+    }
+    await new Promise((r) => setTimeout(r, 80));
+  }
+  return { ok: false, stopped: true, duration_ms: timeoutMs, error: `Timed out waiting for step ${step_index + 1} result.` };
+}
+
+// ==========================================================================
+// Init (rewritten: groups/services UI removed, only playbooks + information)
+// ==========================================================================
+
+function wireSettingsButton(): void {
+  // Keep existing behavior: opens Settings page.
+  document.getElementById('btn-settings')?.addEventListener('click', () => {
+    void chrome.runtime.openOptionsPage?.();
+  });
+  document.getElementById('btn-manage-playbooks')?.addEventListener('click', async () => {
+    try { await chrome.storage.session.set({ __options_tab_hint: 'playbooks' }); } catch {/* session storage opt */}
+    void chrome.runtime.openOptionsPage?.();
+  });
+  document.getElementById('btn-refresh-form-context')?.addEventListener('click', () => {
+    void (async () => {
+      await refreshFormContext();
+      const c = getFormContext();
+      if (!c.on_servicenow) {
+        showToast('warning', 'Form context: not on a ServiceNow form', 'State/table info unavailable.');
+      } else {
+        showToast('success', 'Form context refreshed', `${c.table_name ?? '(no table)'} · ${c.sys_id ? `sys_id ${truncate(c.sys_id, 8)}` : 'no sys_id'}`);
+      }
+    })();
+  });
+}
+
+function wirePickerButtons(): void {
+  // Picker kept for future Dictionary/Field shortcuts; button has been
+  // removed from the panel title bar in the new layout, so only hook if it
+  // comes back (safe no-op for now).
+  const picker = document.getElementById('btn-picker');
+  picker?.addEventListener('click', () => {
+    void (async () => {
+      try {
+        await sendToContent({ kind: 'PANEL_START_PICKER' });
+      } catch (err) {
+        showToast('error', 'Cannot start field picker', String(err));
+      }
+    })();
+  });
+}
+
 function renderAll(shape: StorageShape): void {
-  renderGroups(shape);
+  renderPlaybooks(shape);
   renderInformation();
 }
 
 async function init(): Promise<void> {
   wireSettingsButton();
   wirePickerButtons();
-  wireGroupsShortcuts();
-  wireCollapseAllButton();
-  // Paint the information section immediately so even before any content
-  // messages arrive users see the empty-state hint (not a blank box).
+
+  // Seed builtin YAML playbooks (reassign + close) into storage on every
+  // startup. This idempotently creates or refreshes the bundled examples.
+  try {
+    await mutateStorage((current) => ({ storage: seedBuiltinPlaybooks(current), result: undefined as void }));
+  } catch (e) {
+    showToast('warning', 'Failed to seed builtin playbooks', String(e));
+  }
+
   renderInformation();
+  // Kick off a first form-context refresh so trigger.table badges and
+  // ${current.*} values are populated before the user clicks Run.
+  void refreshFormContext();
+
   const initial = await readStorage();
   renderAll(initial);
   onStorageChanged(renderAll);

@@ -11,39 +11,43 @@
       <header class="panel-titlebar">
         <div class="panel-titlebar-actions">
           <button id="btn-settings" class="panel-icon-button" title="Open settings" type="button">⚙</button>
-          <button id="btn-picker" class="panel-primary-button" type="button">+ Field</button>
+          <button id="btn-manage-playbooks" class="panel-ghost-button" type="button" title="Create or import playbooks">Playbooks</button>
         </div>
       </header>
       <main class="panel-body">
-        <section class="panel-section" id="section-groups">
+        <!-- Playbooks: multi-step workflow runner (new core UX). -->
+        <section class="panel-section" id="section-playbooks">
           <div class="panel-section-head">
-            <h2 class="panel-section-title">Field Groups</h2>
+            <h2 class="panel-section-title">Playbooks</h2>
             <div class="panel-section-head-actions">
-              <button id="btn-collapse-all" class="panel-ghost-button" type="button" title="Collapse all groups">Collapse All</button>
-              <button id="btn-groups-settings" class="panel-ghost-button" type="button">Manage Groups</button>
+              <button id="btn-refresh-form-context" class="panel-ghost-button" type="button" title="Refresh SN form context (table/sysId/state)">Refresh Context</button>
             </div>
           </div>
-          <p id="groups-empty" class="panel-empty">No groups yet. Click <strong>Manage Groups</strong> to create one.</p>
-          <div id="groups-root" class="panel-groups" aria-label="Field groups"></div>
+          <p id="playbooks-empty" class="panel-empty">No playbooks yet. Click <strong>⚙ → Playbooks</strong> (top-right) to create or import a YAML playbook. Two built-in examples (Reassign / Close) should appear once the storage is seeded.</p>
+          <div id="playbooks-root" class="panel-playbooks" aria-label="Multi-step workflow playbooks"></div>
         </section>
 
-        <!-- Information: site-specific details (e.g. globe.com.ph tokens, WO/SID).
-             This section was previously called "Token Status" — renamed and
-             expanded to hold any per-site information, including the access
-             token and work order identifiers used by SRE workflows. -->
+        <!-- Information: per-site information (globe.com.ph tokens, WO ids, SIDs, ...) -->
         <section class="panel-section">
           <h2 class="panel-section-title">Information</h2>
           <ul id="info-list" class="panel-info-list" aria-label="Site information"></ul>
         </section>
-
-        <section class="panel-section">
-          <h2 class="panel-section-title">Services</h2>
-          <p id="services-empty" class="panel-empty">No services yet. Define them in Settings.</p>
-          <ul id="services-list" class="panel-list" aria-label="Remote services"></ul>
-        </section>
       </main>
 
       <footer id="toast-area" class="panel-toast-area" aria-live="polite"></footer>
+    </div>
+
+    <!-- Modal overlay: reused for playbook inputs prompt, playbook editor, etc. -->
+    <div id="modal-root" class="panel-modal-root" hidden aria-hidden="true" role="dialog" aria-modal="true">
+      <div class="panel-modal-backdrop" data-modal-close></div>
+      <div class="panel-modal-dialog" role="document">
+        <header class="panel-modal-header">
+          <h3 id="modal-title" class="panel-modal-title"></h3>
+          <button class="panel-icon-button panel-modal-close" type="button" aria-label="Close" data-modal-close>✕</button>
+        </header>
+        <div id="modal-body" class="panel-modal-body"></div>
+        <footer id="modal-footer" class="panel-modal-footer"></footer>
+      </div>
     </div>
 
     <script type="module" src="./panel.ts"></script>

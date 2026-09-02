@@ -113,6 +113,153 @@ export interface TokenCacheEntry {
   captured_at: number;
 }
 
+// ==========================================================================
+// Dictionary — stable reference data store (sys_ids, choice values, labels).
+// Core fields are key/value/label. The table + field_name attrs are required
+// for choice/state entries because ServiceNow choice values are strongly
+// scoped to their parent table + field combination.
+// ==========================================================================
+
+export type DictCategory =
+  | 'group'    // sys_user_group sys_id
+  | 'user'     // sys_user sys_id
+  | 'choice'   // <table>.<field_name> choice value
+  | 'state'    // <table>.state choice value (separated for workflow author ergonomics)
+  | 'table'    // Table metadata
+  | 'custom';  // Free-form constant
+
+export interface DictEntry {
+  id: string;
+  category: DictCategory;
+  /** Friendly alias used in YAML interpolation: ${dict.<cat>.<key>} */
+  key: string;
+  /** Actual value written to payloads: sys_id / "2" / etc. */
+  value: string;
+  /** Human-readable label, surfaced via `.label` suffix in templates. */
+  label?: string;
+  description?: string;
+  /** Required for choice / state; optional for group/user/custom (used for filtering). */
+  table?: string;
+  /** Required for `choice` category; pins the entry to a specific field. */
+  field_name?: string;
+  created_at: number;
+  updated_at: number;
+}
+
+// ==========================================================================
+// Playbook — multi-step workflow authored as YAML. A single playbook run
+// executes steps sequentially; each step can be a Table API PATCH, a wait
+// on a form field value, or an assertion.
+// ==========================================================================
+
+export type InputType = 'text' | 'textarea' | 'number' | 'date' | 'select';
+
+export interface InputSelectOption {
+  /** Label shown in the select; also available via ${inputs.<key>.label}. */
+  label: string;
+  /** Actual value used in payload interpolation. Supports ${dict.*} refs. */
+  value: string;
+}
+
+/** Expand select options directly from the dictionary. */
+export interface InputDictOptionSource {
+  category: DictCategory;
+  /** When set, only entries with this table are included. */
+  table?: string;
+}
+
+export interface InputDef {
+  key: string;
+  label: string;
+  type: InputType;
+  placeholder?: string;
+  /** Default value; supports variable interpolation. */
+  default?: string;
+  required?: boolean;
+  /** Textarea height hint. */
+  rows?: number;
+  /** Static options for select-type inputs. */
+  options?: InputSelectOption[];
+  /** Dynamic options pulled from the dictionary at runtime. */
+  options_from_dict?: InputDictOptionSource;
+}
+
+export type StepType = 'patch' | 'wait' | 'assert';
+
+export interface BaseStep {
+  id?: string;
+  name?: string;
+  type: StepType;
+  delay_before_ms?: number;
+  delay_after_ms?: number;
+  on_error?: 'stop' | 'skip' | 'retry_and_skip';
+  retry?: { times: number; interval_ms: number };
+}
+
+export interface PatchStep extends BaseStep {
+  type: 'patch';
+  /** When set, values from the referenced FieldGroup are merged first. */
+  from_group?: string;
+  /** Explicit payload (supports variable interpolation). */
+  payload?: Record<string, string>;
+}
+
+export type WaitMatchMode = 'equals' | 'not_equals' | 'one_of' | 'match';
+
+export interface WaitStep extends BaseStep {
+  type: 'wait';
+  field: string;
+  equals?: string;
+  not_equals?: string;
+  one_of?: string[];
+  match?: string;
+  timeout_ms: number;
+  poll_interval_ms?: number;
+  on_timeout?: 'stop' | 'skip';
+}
+
+export interface AssertStep extends BaseStep {
+  type: 'assert';
+  field: string;
+  equals?: string;
+  equals_ref_sys_id?: string;
+  not_equals?: string;
+  match?: string;
+  on_fail?: 'stop' | 'skip';
+}
+
+export type PlaybookStep = PatchStep | WaitStep | AssertStep;
+
+export interface PlaybookTrigger {
+  table?: string;
+  require_state_in?: string[];
+}
+
+export interface PlaybookInlineDict {
+  [category: string]:
+    | Record<string, { value: string; label?: string } | string>
+    | undefined;
+}
+
+export interface Playbook {
+  id: string;
+  /** Schema version; reserved for future YAML DSL evolution. */
+  version: number;
+  slug?: string;
+  name: string;
+  description?: string;
+  author?: string;
+  updated_at: number;
+  /** true for playbooks bundled in src/playbooks/*.yml. These can't be edited. */
+  builtin?: boolean;
+  /** Raw YAML source text (used by editor + round-trip export/download). */
+  yaml_src?: string;
+  trigger?: PlaybookTrigger;
+  inputs?: InputDef[];
+  inline_dict?: PlaybookInlineDict;
+  steps: PlaybookStep[];
+}
+
 /** Top-level shape persisted in chrome.storage.local. */
 export interface StorageShape {
   schema_version: number;
@@ -121,16 +268,20 @@ export interface StorageShape {
   services: Record<string, RemoteService>;
   tokens: Record<string, TokenConfig>;
   token_cache: Record<string, TokenCacheEntry>;
+  dict_entries: Record<string, DictEntry>;
+  playbooks: Record<string, Playbook>;
 }
 
 /** Default storage shape used on first install. */
 export function emptyStorage(): StorageShape {
   return {
-    schema_version: 1,
+    schema_version: 2,
     fields: {},
     groups: {},
     services: {},
     tokens: {},
     token_cache: {},
+    dict_entries: {},
+    playbooks: {},
   };
 }

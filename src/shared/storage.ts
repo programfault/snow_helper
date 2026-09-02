@@ -19,6 +19,8 @@ export async function readStorage(): Promise<StorageShape> {
     services: raw.services ?? base.services,
     tokens: raw.tokens ?? base.tokens,
     token_cache: raw.token_cache ?? base.token_cache,
+    dict_entries: raw.dict_entries ?? base.dict_entries,
+    playbooks: raw.playbooks ?? base.playbooks,
   };
 }
 

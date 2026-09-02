@@ -1,0 +1,68 @@
+version: 1
+name: Close Incident (Mock)
+slug: close-incident
+author: SRE Helper
+description: >
+  2-step mock workflow: prompt for close code + close note, then PATCH the
+  incident as resolved/closed with the provided text. Demonstrates
+  close_code select input + multiline note.
+
+trigger:
+  table: incident
+
+inputs:
+  - key: close_code
+    label: "Close Code"
+    type: select
+    required: true
+    options:
+      - label: "Solved (Permanently)"
+        value: "Solved Permanently"
+      - label: "Work Around"
+        value: "Work Around"
+      - label: "Closed / Rejected"
+        value: "Closed Rejected"
+      - label: "Duplicate Ticket"
+        value: "Duplicate"
+    default: "Solved Permanently"
+
+  - key: close_notes
+    label: "Close Notes"
+    type: textarea
+    placeholder: "Describe the root cause + fix. Will appear in the audit trail."
+    required: true
+    rows: 6
+
+  - key: resolution_time_minutes
+    label: "Resolution Time (minutes)"
+    type: number
+    required: false
+
+inline_dict:
+  states:
+    incident:
+      closed: { value: "7", label: "Closed" }
+  choices:
+    incident_state:
+      closed: { value: "7", label: "Closed" }
+    close_notes_code:
+      user: { value: "user fix", label: "User Action" }
+
+steps:
+  - type: patch
+    name: "1. Resolve + write close notes"
+    payload:
+      state: "${dict.states.incident.closed}"
+      close_code: "${inputs.close_code}"
+      close_notes: |
+        ${inputs.close_notes}
+        --
+        Closed by SRE Helper at ${now_local}
+        Resolution time (min): ${inputs.resolution_time_minutes:-not reported}
+    on_error: stop
+
+  - type: assert
+    name: "2. Confirm state is Closed"
+    field: state
+    equals: "${dict.states.incident.closed}"
+    on_fail: stop

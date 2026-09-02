@@ -232,12 +232,427 @@ function ensureInjected(): void {
           // Phase 4
           sendResponse({ ok: true });
           return false;
+        case 'PANEL_GET_FORM_CONTEXT':
+          // Async MAIN-world probe; return true so Chrome keeps the channel.
+          void probeFormContext().then((ctx) => {
+            try { sendResponse(ctx); } catch { /* channel closed */ }
+          });
+          return true;
+        case 'PANEL_PLAYBOOK_RUN_STEP':
+          // Execute a single playbook step on MAIN world.
+          void runPlaybookStep(
+            message.run_id,
+            message.step_index,
+            message.step,
+          ).then((res) => {
+            try {
+              // CONTENT_PLAYBOOK_STEP_RESULT message back to the panel.
+              postToPanel({
+                kind: 'CONTENT_PLAYBOOK_STEP_RESULT',
+                run_id: res.run_id,
+                step_index: res.step_index,
+                ok: res.ok,
+                stopped: res.stopped,
+                skipped: res.skipped,
+                status: res.status,
+                duration_ms: res.duration_ms,
+                body: res.body,
+                error: res.error,
+              });
+              sendResponse({ ok: true });
+            } catch { /* panel disconnected: ignore */ }
+          });
+          return true;
         default:
           return false;
       }
     },
   );
-  console.log('[sn-helper] content script injected at', location.href);
+  console.log('[sre-helper] content script injected at', location.href);
+}
+
+// ==========================================================================
+// Playbook step execution (MAIN world)
+// ==========================================================================
+
+type StepResult = {
+  run_id: string;
+  step_index: number;
+  ok: boolean;
+  stopped?: boolean;
+  skipped?: boolean;
+  status?: number;
+  duration_ms: number;
+  body?: unknown;
+  error?: string;
+};
+
+/**
+ * Returns a structured snapshot of the current SN form by probing MAIN world
+ * (g_form + g_user). Always responds synchronously with on_servicenow=false
+ * when the probe fails (so the panel can show "not on a SN form" context).
+ */
+async function probeFormContext(): Promise<{
+  on_servicenow: boolean;
+  table_name?: string;
+  sys_id?: string;
+  user_name?: string;
+  user_display?: string;
+  values?: Record<string, string>;
+  displays?: Record<string, string>;
+}> {
+  const t0 = performance.now();
+  const fallback = { on_servicenow: false };
+  if (!chrome.scripting?.executeScript) return fallback;
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab?.id) return fallback;
+    const [{ result }] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id, allFrames: false },
+      world: 'MAIN',
+      func: () => {
+        const w = window as unknown as {
+          g_form?: {
+            getTableName?: () => string;
+            getUniqueValue?: () => string;
+            getFieldNames?: () => string[];
+            getValue?: (f: string) => string;
+            getDisplayValue?: (f: string) => string;
+          };
+          g_user?: {
+            userName?: string;
+            userID?: string;
+            getUserName?: () => string;
+            getDisplayName?: () => string;
+            firstName?: string;
+            lastName?: string;
+          };
+        };
+        const onSN = typeof w.g_form?.getUniqueValue === 'function';
+        if (!onSN) return { on_servicenow: false };
+        const gf = w.g_form!;
+        const gu = w.g_user;
+        const table = gf.getTableName?.();
+        const sysId = gf.getUniqueValue?.();
+        const fields = gf.getFieldNames?.() ?? [];
+        const values: Record<string, string> = {};
+        const displays: Record<string, string> = {};
+        for (const f of fields) {
+          try {
+            const v = gf.getValue?.(f);
+            if (typeof v === 'string') values[f] = v;
+            const d = gf.getDisplayValue?.(f);
+            if (typeof d === 'string') displays[f] = d;
+          } catch { /* noop */ }
+        }
+        const userName = gu?.userName ?? (typeof gu?.getUserName === 'function' ? gu.getUserName() : undefined);
+        let userDisplay: string | undefined;
+        if (typeof gu?.getDisplayName === 'function') userDisplay = gu.getDisplayName();
+        else if (gu?.firstName && gu?.lastName) userDisplay = `${gu.firstName} ${gu.lastName}`;
+        return {
+          on_servicenow: true,
+          table_name: table,
+          sys_id: sysId,
+          user_name: userName,
+          user_display: userDisplay,
+          values,
+          displays,
+        };
+      },
+    });
+    void t0;
+    return (result as
+      | {
+          on_servicenow: boolean;
+          table_name?: string;
+          sys_id?: string;
+          user_name?: string;
+          user_display?: string;
+          values?: Record<string, string>;
+          displays?: Record<string, string>;
+        }
+      | undefined) ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+async function runPlaybookStep(
+  run_id: string,
+  step_index: number,
+  step: ContentToPanelMessage extends infer _R ? any : any,
+): Promise<StepResult> {
+  const t0 = performance.now();
+  const nowMs = (delay = 0) => Math.round(performance.now() - t0 + delay);
+  if (!step || !step.type) {
+    return {
+      run_id, step_index, ok: false, stopped: true,
+      duration_ms: nowMs(), error: `Unknown step.type: ${String(step?.type)}`,
+    };
+  }
+
+  // Apply delay_before_ms before the actual step.
+  if (typeof step.delay_before_ms === 'number' && step.delay_before_ms > 0) {
+    await new Promise((r) => setTimeout(r, step.delay_before_ms));
+  }
+
+  let retriesLeft = 0;
+  let retryInterval = 0;
+  if (step.retry && typeof step.retry.times === 'number') {
+    retriesLeft = Math.max(0, step.retry.times | 0);
+    retryInterval = Math.max(0, (step.retry.interval_ms ?? 250) | 0);
+  }
+  const onErrorPolicy: 'stop' | 'skip' | 'retry_and_skip' = step.on_error ?? 'stop';
+
+  let lastErr: string | undefined;
+  let lastStatus: number | undefined;
+  let lastBody: unknown;
+  let attemptOk = false;
+  // wait/assert never trigger retry on_error semantics (they're reads, not writes).
+  const canRetry = step.type === 'patch';
+
+  do {
+    lastErr = undefined;
+    try {
+      switch (step.type) {
+        case 'patch': {
+          const patchRes = await executePatchStepInMain(step as any);
+          attemptOk = patchRes.ok;
+          lastStatus = patchRes.status;
+          lastBody = patchRes.body;
+          if (!attemptOk) lastErr = patchRes.error ?? `PATCH failed with status ${patchRes.status}`;
+          break;
+        }
+        case 'wait': {
+          const waitRes = await executeWaitStepInMain(step as any);
+          attemptOk = waitRes.ok;
+          lastStatus = 200;
+          lastBody = waitRes.body;
+          if (!attemptOk) {
+            const policy: 'stop' | 'skip' = (step as any).on_timeout ?? 'stop';
+            return {
+              run_id, step_index,
+              ok: false,
+              stopped: policy === 'stop',
+              skipped: policy === 'skip',
+              duration_ms: nowMs(),
+              error: waitRes.error ?? 'Wait timed out.',
+            };
+          }
+          break;
+        }
+        case 'assert': {
+          const assertRes = await executeAssertStepInMain(step as any);
+          attemptOk = assertRes.ok;
+          lastStatus = 200;
+          lastBody = assertRes.body;
+          if (!attemptOk) {
+            const policy: 'stop' | 'skip' = (step as any).on_fail ?? 'stop';
+            return {
+              run_id, step_index,
+              ok: false,
+              stopped: policy === 'stop',
+              skipped: policy === 'skip',
+              duration_ms: nowMs(),
+              error: assertRes.error ?? 'Assertion failed.',
+            };
+          }
+          break;
+        }
+        default:
+          return {
+            run_id, step_index, ok: false, stopped: true, duration_ms: nowMs(),
+            error: `Unsupported step.type: ${String(step.type)}`,
+          };
+      }
+    } catch (e: any) {
+      attemptOk = false;
+      lastErr = String(e?.message ?? e);
+    }
+
+    if (attemptOk) break;
+    if (!canRetry || retriesLeft <= 0) break;
+    retriesLeft -= 1;
+    await new Promise((r) => setTimeout(r, retryInterval));
+  } while (!attemptOk && retriesLeft >= 0);
+
+  // delay_after_ms
+  if (typeof step.delay_after_ms === 'number' && step.delay_after_ms > 0) {
+    await new Promise((r) => setTimeout(r, step.delay_after_ms));
+  }
+
+  if (!attemptOk) {
+    // Determine stopped vs skipped.
+    const skipped = onErrorPolicy === 'skip' || onErrorPolicy === 'retry_and_skip';
+    const stopped = !skipped; // stop is the default
+    return {
+      run_id, step_index,
+      ok: false,
+      stopped, skipped,
+      status: lastStatus,
+      duration_ms: nowMs(),
+      body: lastBody,
+      error: lastErr ?? 'Step failed.',
+    };
+  }
+  return {
+    run_id, step_index,
+    ok: true,
+    status: lastStatus,
+    duration_ms: nowMs(),
+    body: lastBody,
+  };
+}
+
+// -- MAIN-world helpers for each step type ---------------------------------
+
+interface PatchOutcome { ok: boolean; status: number; body?: unknown; error?: string; }
+
+async function executePatchStepInMain(step: any): Promise<PatchOutcome> {
+  const payload: Record<string, string> | undefined = step.payload;
+  // Mock phase: do not issue real HTTP call. Simulate 450ms latency and a
+  // deterministic 200 with the echo'd payload back so the panel can
+  // visualise the full round-trip. Switch the commented block below on to
+  // enable real Table API calls.
+  await new Promise((r) => setTimeout(r, 450));
+  return {
+    ok: true,
+    status: 200,
+    body: {
+      mock: true,
+      message: 'PATCH simulation OK. Switch to real fetch in content/index.ts:executePatchStepInMain for live writes.',
+      payload_sent: payload ?? {},
+    },
+  };
+  /*
+  // ---------- REAL Table API PATCH (enable after mock verification) ----------
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id) return { ok: false, status: 0, error: 'No active tab.' };
+  const [{ result }] = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    world: 'MAIN',
+    args: [payload ?? {}],
+    func: (body: Record<string, string>) => new Promise<PatchOutcome>((resolve) => {
+      try {
+        const w = window as any;
+        const table = w.g_form?.getTableName?.();
+        const sysId = w.g_form?.getUniqueValue?.();
+        if (!table || !sysId) {
+          resolve({ ok: false, status: 0, error: 'No g_form table/sys_id available on this page.' });
+          return;
+        }
+        fetch(`/api/now/table/${table}/${sysId}`, {
+          method: 'PATCH',
+          credentials: 'include',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-UserToken': String(w.g_ck ?? ''),
+          },
+          body: JSON.stringify(body),
+        })
+        .then(async (r) => {
+          try {
+            const j = await r.json();
+            resolve({ ok: r.ok, status: r.status, body: j });
+          } catch {
+            resolve({ ok: r.ok, status: r.status, error: `HTTP ${r.status}: Non-JSON response` });
+          }
+        })
+        .catch((e) => resolve({ ok: false, status: 0, error: String(e?.message ?? e) }));
+      } catch (e: any) {
+        resolve({ ok: false, status: 0, error: String(e?.message ?? e) });
+      }
+    }),
+  });
+  return (result as PatchOutcome | undefined) ?? { ok: false, status: 0, error: 'No result from MAIN world.' };
+  */
+}
+
+async function executeWaitStepInMain(step: any): Promise<{ ok: boolean; body?: unknown; error?: string; }> {
+  const field: string = step.field;
+  const equals = typeof step.equals === 'string' ? step.equals : undefined;
+  const notEquals = typeof step.not_equals === 'string' ? step.not_equals : undefined;
+  const oneOf: string[] | undefined = Array.isArray(step.one_of) ? step.one_of.map(String) : undefined;
+  const match: string | undefined = typeof step.match === 'string' ? step.match : undefined;
+  const timeoutMs = Math.max(1, Number(step.timeout_ms ?? 5000) | 0);
+  const pollMs = Math.max(250, Number(step.poll_interval_ms ?? 500) | 0);
+
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id) return { ok: false, error: 'No active tab.' };
+  try {
+    const [{ result }] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      world: 'MAIN',
+      args: [field, equals, notEquals, oneOf, match, timeoutMs, pollMs],
+      func: (fld, eq, neq, oneOfArr, matchRe, tMs, pMs) => new Promise<{ ok: boolean; body?: unknown; error?: string; }>((resolve) => {
+        const w = window as any;
+        if (!w.g_form || typeof w.g_form.getValue !== 'function') {
+          resolve({ ok: false, error: 'g_form not available.' });
+          return;
+        }
+        const deadline = Date.now() + tMs;
+        const check = () => {
+          try {
+            const v: string = w.g_form.getValue(fld) ?? '';
+            let pass = false;
+            if (eq !== undefined) pass = v === eq;
+            else if (neq !== undefined) pass = v !== neq;
+            else if (oneOfArr !== undefined) pass = oneOfArr.includes(v);
+            else if (matchRe !== undefined) pass = new RegExp(matchRe).test(v);
+            if (pass) { resolve({ ok: true, body: { field: fld, value: v, matched: true } }); return; }
+            if (Date.now() >= deadline) { resolve({ ok: false, error: `Wait timeout: field "${fld}" current="${v}".`, body: { current_value: v } }); return; }
+            setTimeout(check, pMs);
+          } catch (e: any) { resolve({ ok: false, error: String(e?.message ?? e) }); }
+        };
+        check();
+      }),
+    });
+    return (result as any) ?? { ok: false, error: 'No MAIN result.' };
+  } catch (e: any) {
+    return { ok: false, error: String(e?.message ?? e) };
+  }
+}
+
+async function executeAssertStepInMain(step: any): Promise<{ ok: boolean; body?: unknown; error?: string; }> {
+  const field: string = step.field;
+  const equals = typeof step.equals === 'string' ? step.equals : undefined;
+  const equalsRef = typeof step.equals_ref_sys_id === 'string' ? step.equals_ref_sys_id : undefined;
+  const notEquals = typeof step.not_equals === 'string' ? step.not_equals : undefined;
+  const match: string | undefined = typeof step.match === 'string' ? step.match : undefined;
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id) return { ok: false, error: 'No active tab.' };
+  try {
+    const [{ result }] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      world: 'MAIN',
+      args: [field, equals, equalsRef, notEquals, match],
+      func: (fld, eq, refEq, neq, matchRe) => {
+        const w = window as any;
+        if (!w.g_form || typeof w.g_form.getValue !== 'function') {
+          return { ok: false, error: 'g_form not available.' };
+        }
+        const v: string = w.g_form.getValue(fld) ?? '';
+        let expected = eq;
+        // equals_ref_sys_id is used when comparing reference fields; the raw
+        // value is the sys_id itself, so we compare directly after unifying
+        // with refEq if provided.
+        if (expected === undefined && refEq !== undefined) expected = refEq;
+        let pass = false;
+        if (expected !== undefined) pass = v === expected;
+        else if (neq !== undefined) pass = v !== neq;
+        else if (matchRe !== undefined) pass = new RegExp(matchRe).test(v);
+        if (pass) return { ok: true, body: { field: fld, value: v } };
+        return {
+          ok: false,
+          body: { field: fld, current_value: v, expected, neq, matchRe },
+          error: `Assert failed on "${fld}": got "${v}"`,
+        };
+      },
+    });
+    return (result as any) ?? { ok: false, error: 'No MAIN result.' };
+  } catch (e: any) {
+    return { ok: false, error: String(e?.message ?? e) };
+  }
 }
 
 // ===========================================================================

@@ -9,12 +9,27 @@
 //   content -> panel: chrome.runtime.sendMessage(message)
 //                     + chrome.runtime.onMessage filtered by sender.tab.id
 
-import type { FieldEntry, FieldGroup } from './types';
+import type { FieldEntry, FieldGroup, PlaybookStep } from './types';
 
 // Re-export so callers can import types alongside messages without reaching
 // into the types module separately.
 export type { FieldEntry };
-export type { FieldType, FieldGroup, FieldGroupItem } from './types';
+export type {
+  FieldType,
+  FieldGroup,
+  FieldGroupItem,
+  DictEntry,
+  DictCategory,
+  Playbook,
+  PlaybookStep,
+  InputDef,
+  InputSelectOption,
+  PatchStep,
+  WaitStep,
+  AssertStep,
+  PlaybookTrigger,
+  PlaybookInlineDict,
+} from './types';
 
 // ---------------------------------------------------------------------------
 // Side panel -> Content script  (chrome.tabs.sendMessage)
@@ -35,7 +50,21 @@ export type PanelToContentMessage =
     }
   // Phase 4 — service invocation (routed via SW, but content script
   // intercepts this and forwards context to the SW)
-  | { kind: 'PANEL_INVOKE_SERVICE'; service_id: string };
+  | { kind: 'PANEL_INVOKE_SERVICE'; service_id: string }
+  // --- Playbook engine: panel asks content script to fetch current form
+  // context (table/sysId/g_user + all field values) used before running
+  // steps, so the panel can resolve ${current.*} / trigger.table checks.
+  | { kind: 'PANEL_GET_FORM_CONTEXT' }
+  // --- Playbook engine: runs a single step on the MAIN world.
+  // The panel has already interpolated variables into patch payloads so
+  // the content script just forwards raw payloads to MAIN-world fetch/wait
+  // /assert callables. Mock-mode patch never hits a real URL.
+  | {
+      kind: 'PANEL_PLAYBOOK_RUN_STEP';
+      run_id: string;
+      step_index: number;
+      step: PlaybookStep;
+    };
 
 // ---------------------------------------------------------------------------
 // Content script -> Side panel  (chrome.runtime.sendMessage)
@@ -96,6 +125,34 @@ export type ContentToPanelMessage =
       work_order_id?: string;
       /** Service ID extracted from the WO detail summary ("Service ID" h6). */
       service_id?: string;
+    }
+  // Playbook engine: snapshot of the current form (table/sysId/fields) so
+  // the panel can perform trigger checks and ${current.*} interpolation
+  // before sending any steps to the content script.
+  | {
+      kind: 'CONTENT_FORM_CONTEXT';
+      on_servicenow: boolean;
+      table_name?: string;
+      sys_id?: string;
+      user_name?: string;
+      user_display?: string;
+      values?: Record<string, string>;
+      displays?: Record<string, string>;
+    }
+  // Playbook engine: single step result forwarded from MAIN world. The
+  // panel stitches these into the per-playbook progress card, and uses
+  // the ok flag to decide whether to continue to the next step.
+  | {
+      kind: 'CONTENT_PLAYBOOK_STEP_RESULT';
+      run_id: string;
+      step_index: number;
+      ok: boolean;
+      stopped?: boolean;      // true when stop-on-error is reached (panel should abort the run)
+      skipped?: boolean;      // true on_error=skip / on_timeout=skip / on_fail=skip
+      status?: number;        // HTTP status for patch (mock: 200)
+      duration_ms: number;
+      body?: unknown;
+      error?: string;         // Human readable error message, shown in toast
     };
 
 // ---------------------------------------------------------------------------

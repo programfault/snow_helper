@@ -1,0 +1,96 @@
+version: 1
+name: Reassign Incident (Mock)
+slug: reassign-incident
+author: SRE Helper
+description: >
+  4-step mock workflow: Progress+Ack → wait for state=2 → choose Investigate
+  → fill assignment group. Demonstrates inputs modal, dictionary references,
+  and the side-panel step progress UI. Not a real ServiceNow API call yet.
+
+trigger:
+  table: incident
+  require_state_in: ["1", "2"]
+
+inputs:
+  - key: remark
+    label: "Reassignment Remark"
+    type: textarea
+    placeholder: "Briefly explain why this ticket is being reassigned, e.g. user line issue confirmed NOC side"
+    required: true
+    rows: 4
+
+  - key: target_group
+    label: "Target Team"
+    type: select
+    required: true
+    options:
+      - label: "Network Support Team"
+        value: "demo-sysid-network-00000000000001"
+      - label: "NOC 24x7 L1"
+        value: "demo-sysid-noc-l1-000000000000002"
+      - label: "Cloud Infra Team"
+        value: "demo-sysid-cloud-00000000000003"
+    default: "demo-sysid-network-00000000000001"
+
+  - key: escalate_priority
+    label: "Escalate Priority?"
+    type: select
+    required: false
+    options:
+      - label: "Keep current"
+        value: ""
+      - label: "P1 - Critical"
+        value: "1"
+      - label: "P2 - High"
+        value: "2"
+    default: ""
+
+inline_dict:
+  states:
+    incident:
+      new:        { value: "1", label: "New" }
+      in_progress:{ value: "2", label: "In Progress" }
+  choices:
+    subcategory:
+      investigate:{ value: "investigate", label: "Investigate" }
+
+steps:
+  - id: progress_ack
+    type: patch
+    name: "1. Progress + Acknowledge"
+    payload:
+      state: "${dict.states.incident.in_progress}"
+      active: "true"
+      acknowledged: "true"
+      work_notes: |
+        [SRE Helper] ${now_local} by ${user_name:-unknown}
+        Action: Reassignment workflow started
+        Target team: ${inputs.target_group.label}
+        Remark:
+        ---
+        ${inputs.remark}
+        ---
+    delay_after_ms: 200
+
+  - type: wait
+    name: "2. Wait until state becomes In Progress"
+    field: state
+    equals: "${dict.states.incident.in_progress}"
+    timeout_ms: 6000
+    poll_interval_ms: 500
+    on_timeout: stop
+
+  - type: patch
+    name: "3. Set Investigate subcategory + assignment"
+    payload:
+      subcategory: "${dict.choices.subcategory.investigate}"
+      assignment_group: "${inputs.target_group}"
+      priority: "${inputs.escalate_priority?skip_empty}"
+      work_notes: "[SRE Helper] Subcategory set to Investigate; assigned to ${inputs.target_group.label}"
+    on_error: stop
+
+  - type: assert
+    name: "4. Confirm assignment_group has been written"
+    field: assignment_group
+    equals: "${inputs.target_group}"
+    on_fail: stop
